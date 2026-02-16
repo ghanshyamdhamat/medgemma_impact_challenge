@@ -1,0 +1,105 @@
+Overview of 
+app_medgemma.py
+This is a Gradio-based web application (2588 lines) for interactive medical image/video segmentation using MedSAM2 (Medical Segment Anything Model 2). It's designed for radiologists to review patient MRI scans, segment tumors or other regions of interest, and generate volumetric analysis reports.
+
+🏗️ Architecture
+The app uses a multi-process architecture where each user session runs segmentation in a separate multiprocessing.Process, communicating via queues. A background monitor thread cleans up idle sessions after 15 minutes.
+
+Main Thread (Gradio UI)
+  ├── Monitor Thread (cleanup idle processes)
+  └── Per-User Worker Processes (GPU-intensive SAM2 inference)
+       └── Communicate via mp.Queue
+📂 Key Components
+1. Patient Data Management (Lines 52–537)
+COMMON_DATA_PATH — points to a shared directory of patient folders
+Functions to browse a hierarchical data structure:
+get_patient_list()
+ → list patient folders
+get_patient_sessions(patient_id)
+ → list MRI scan sessions (e.g., sess_0, sess_1)
+get_session_scans(patient_id, session_id)
+ → list .nii.gz NIfTI files
+find_flair_scan()
+ → auto-locate FLAIR MRI sequences
+get_slice_id_for_patient_session()
+ → read pre-annotated slice indices from JSON
+load_patient_summary_data()
+ reads a comman_format.json file containing patient metadata (tumor status, confidence scores, radiologist review status)
+sort_patient_data()
+ prioritizes un-reviewed patients and tumor cases
+2. NIfTI Processing (Lines 229–441)
+load_nifti_slice()
+ — loads a 3D NIfTI volume and extracts a 2D slice as an RGB image
+nifti_to_video()
+ — converts an entire NIfTI volume into an MP4 video (each slice = one frame), enabling SAM2's video segmentation pipeline to work on 3D medical images
+load_annotation_from_json()
+ — loads pre-existing annotations for overlay
+3. SAM2 Segmentation Core (Lines 689–897)
+get_meta_from_video()
+ — extracts video frames via ffmpeg, initializes the SAM2 video predictor and image predictor on CUDA
+sam_click()
+ — handles point prompt interactions (positive/negative clicks)
+sam_stroke()
+ — handles stroke/box prompt interactions (bounding box from drawn strokes)
+show_mask()
+ — overlays colored segmentation masks on images
+draw_markers()
+ / 
+draw_rect()
+ — visualize click points and bounding boxes
+4. Object Tracking (Lines 1283–1365)
+tracking_objects()
+ — runs bidirectional propagation from the annotated frame:
+Forward propagation through remaining frames
+Backward propagation through preceding frames
+Saves binary masks and combined overlay frames
+Generates output video and zipped mask files
+5. NIfTI Export & Volume Analysis (Lines 938–1061)
+convert_masks_to_nifti()
+ — reconstructs 2D segmentation masks back into a 3D NIfTI volume, calculates:
+Voxel count
+Total volume in mm³ and mL (using voxel spacing from the original NIfTI header)
+Generates a text report
+6. Parcellation Analysis (Lines 1063–1281)
+run_parcellation_analysis()
+ — calls an external script (parcellation_by_registration.py) that registers the patient scan to MNI space and maps segmented regions to brain atlas labels (DKT atlas)
+update_patient_results_json()
+ — saves session-specific parcellation results to patient_results.json
+update_patient_json_with_parcellation()
+ — updates the global comman_format.json with parcellation findings
+7. Worker Process Loop (Lines 1378–1499)
+process_video()
+ — a long-running worker that receives commands via queue:
+extract_video_info
+, 
+get_meta_from_video
+, 
+sam_click
+, 
+sam_stroke
+, 
+tracking_objects
+, 
+convert_to_nifti
+, 
+reset
+, etc.
+8. Gradio Frontend (Lines 1545–2588)
+Two-tab interface:
+
+Tab	Purpose
+📋 Patient Overview	HTML table of all patients (color-coded: 🔴 red = not reviewed, 🟢 green = reviewed), dropdown to select a patient, auto-loads most recent session's FLAIR scan
+🔬 Segmentation	Video viewer + interactive annotation (point/stroke prompts), frame slider, object tracking, NIfTI export with volume report & parcellation analysis
+🔄 Typical Workflow
+Patient Selection → User picks a patient from the table → App auto-selects the most recent session's FLAIR scan
+NIfTI → Video → The 3D NIfTI volume is converted to MP4 (one frame per slice)
+Preprocess → SAM2 model is loaded on GPU, video frames are extracted
+Annotate → User clicks (point prompt) or draws (box prompt) on the target slice to segment a region
+Track → Bidirectional propagation spreads the segmentation across all slices
+Export → Masks are converted back to NIfTI, volume is calculated, parcellation analysis maps regions to brain atlas labels
+Save → Results are written to patient_results.json and comman_format.json
+⚙️ Key Technical Details
+Model: SAM2 (Segment Anything Model 2) with configurable config/checkpoint files
+GPU: Requires CUDA, uses bfloat16 autocast and TF32 optimizations
+Server: Runs on 0.0.0.0:18862 with Gradio 3.38.0
+Dependencies: torch, nibabel, ffmpeg, moviepy, cv2, sam2, omegaconf, gradio
