@@ -1980,6 +1980,12 @@ def seg_track_app():
         print(f"session_id {session_id}")
         return session_id
 
+    def make_editor_value(image):
+        """Return a stable Gradio ImageEditor image value."""
+        if image is None:
+            image = np.zeros((512, 512, 3), dtype=np.uint8)
+        return image
+
     def handle_extract_video_info(session_id, input_video, skip_flag, current_slider_state):
         # If the pipeline already preprocessed the video, skip this handler
         # to avoid resetting the slider/frame back to 0
@@ -1994,7 +2000,7 @@ def seg_track_app():
             "maximum": 100,
             "step": 0.01,
             "value": 0.0,
-        }, None, None, None, None, None, False
+        }, gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), False
         queue = start_process(session_id)
         result_queue = user_processes[session_id]["result_queue"]
         queue.put({"command": "extract_video_info", "input_video": input_video})
@@ -2002,7 +2008,7 @@ def seg_track_app():
         fps = result.get("fps")
         total_frames = result.get("total_frames")
         input_first_frame = result.get("input_first_frame")
-        drawing_board = result.get("drawing_board")
+        drawing_board = make_editor_value(result.get("drawing_board"))
         output_video = result.get("output_video")
         output_mp4 = result.get("output_mp4")
         output_mask = result.get("output_mask")
@@ -2020,7 +2026,8 @@ def seg_track_app():
             "step": 1.0/fps,
             "value": 0.0,
         }
-        return scale_slider, frame_per, slider_state, input_first_frame, drawing_board, output_video, output_mp4, output_mask, False
+        # Do not overwrite frame/canvas outputs here; they are set by handle_get_meta_from_video
+        return scale_slider, frame_per, slider_state, gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), False
 
     def handle_get_meta_from_video(session_id, input_video, scale_slider, config_path, checkpoint_path, patient_info=None):
         # Validate that a video is loaded
@@ -2119,14 +2126,10 @@ def seg_track_app():
         # The ImageEditor expects: {"background": image, "layers": [], "composite": None}
         if drawing_board_img is not None:
             print(f"[DEBUG] handle_get_meta_from_video: drawing_board_img type={type(drawing_board_img)}, shape={drawing_board_img.shape if hasattr(drawing_board_img, 'shape') else 'N/A'}")
-            drawing_board = {
-                "background": drawing_board_img,
-                "layers": [],
-                "composite": None
-            }
+            drawing_board = drawing_board_img
         else:
             print(f"[DEBUG] handle_get_meta_from_video: drawing_board_img is None!")
-            drawing_board = None
+            drawing_board = input_first_frame
         
         print(f"[DEBUG] handle_get_meta_from_video: Returning initial_frame_num={initial_frame_num}, frame_display_text={frame_display_text}")
         return input_first_frame, drawing_board, frame_per, slider_state, output_video, output_mp4, output_mask, ann_obj_id, max_obj_id, obj_id_slider, initial_frame_num, frame_display_text
@@ -2158,6 +2161,9 @@ def seg_track_app():
         result = result_queue.get()
         input_first_frame = result.get("input_first_frame")
         drawing_board = result.get("drawing_board")
+        if isinstance(drawing_board, dict):
+            drawing_board = drawing_board.get("background")
+        drawing_board = make_editor_value(drawing_board)
         last_draw = result.get("last_draw")
         return input_first_frame, drawing_board, last_draw
 
@@ -2190,6 +2196,9 @@ def seg_track_app():
         result = result_queue.get()
         input_first_frame = result.get("input_first_frame")
         drawing_board = result.get("drawing_board")
+        if isinstance(drawing_board, dict):
+            drawing_board = drawing_board.get("background")
+        drawing_board = make_editor_value(drawing_board)
         last_draw = result.get("last_draw")
         return input_first_frame, drawing_board, last_draw
 
@@ -2215,12 +2224,14 @@ def seg_track_app():
 
     def handle_drawing_board_get_input_first_frame(session_id, input_first_frame):
         # clean_up_processes(session_id)
+        if input_first_frame is None:
+            return gr.skip()
         queue = start_process(session_id)
         result_queue = user_processes[session_id]["result_queue"]
         queue.put({"command": "drawing_board_get_input_first_frame", "input_first_frame": input_first_frame})
         result = result_queue.get()
         input_first_frame = result.get("input_first_frame")
-        return input_first_frame
+        return make_editor_value(input_first_frame)
 
     def handle_reset(session_id):
         # clean_up_processes(session_id)
@@ -2231,6 +2242,9 @@ def seg_track_app():
         click_stack = result.get("click_stack")
         input_first_frame = result.get("input_first_frame")
         drawing_board = result.get("drawing_board")
+        if isinstance(drawing_board, dict):
+            drawing_board = drawing_board.get("background")
+        drawing_board = make_editor_value(drawing_board)
         slider_state = {
             "minimum": 0.0,
             "maximum": 100,
@@ -2256,6 +2270,9 @@ def seg_track_app():
         result = result_queue.get()
         input_first_frame = result.get("input_first_frame")
         drawing_board = result.get("drawing_board")
+        if isinstance(drawing_board, dict):
+            drawing_board = drawing_board.get("background")
+        drawing_board = make_editor_value(drawing_board)
         frame_num = result.get("frame_num")
         
         # Update frame display
@@ -2271,6 +2288,9 @@ def seg_track_app():
         result = result_queue.get()
         input_first_frame = result.get("input_first_frame")
         drawing_board = result.get("drawing_board")
+        if isinstance(drawing_board, dict):
+            drawing_board = drawing_board.get("background")
+        drawing_board = make_editor_value(drawing_board)
         output_video = result.get("output_video")
         output_mp4 = result.get("output_mp4")
         output_mask = result.get("output_mask")
@@ -2789,7 +2809,14 @@ def seg_track_app():
 
                         with gr.Tabs():
                             with gr.Tab(label="Stroke to Box Prompt") as tab_stroke:
-                                drawing_board = gr.ImageEditor(label='Drawing Board', brush=gr.Brush(default_size=10), interactive=True, type="numpy")
+                                drawing_board = gr.ImageEditor(
+                                    label='Drawing Board',
+                                    brush=gr.Brush(default_size=10),
+                                    interactive=True,
+                                    type="numpy",
+                                    height=550,
+                                    value=np.zeros((512, 512, 3), dtype=np.uint8)
+                                )
                                 with gr.Row():
                                     seg_acc_stroke = gr.Button(value="Segment", interactive=True)
                                     
@@ -3239,11 +3266,7 @@ def seg_track_app():
             outputs={ann_obj_id}
         )
 
-        tab_stroke.select(
-            fn=handle_drawing_board_get_input_first_frame,
-            inputs=[session_id, input_first_frame],
-            outputs=[drawing_board,],
-        )
+        # Do not overwrite drawing_board on tab select; it is managed by meta/preprocess flow
 
         seg_acc_stroke.click(
             fn=handle_sam_stroke,
