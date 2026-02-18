@@ -16,6 +16,7 @@ from os.path import basename, splitext, dirname, exists, join
 import threading
 import time
 import traceback
+import tempfile
 os.environ["TORCH_CUDNN_SDPA_ENABLED"] = "1"
 import shutil
 import ffmpeg
@@ -31,6 +32,7 @@ from sam2.build_sam import build_sam2_video_predictor
 import cv2
 import nibabel as nib
 from omegaconf import OmegaConf
+from simplify_report import MedGemmaSimplify
 
 # Register custom resolvers to avoid omegaconf errors with certain configs
 for resolver_name, resolver_func in [
@@ -51,6 +53,52 @@ PROCESS_TIMEOUT = datetime.timedelta(minutes=15)
 
 # Path to common_data directory containing patient folders
 COMMON_DATA_PATH = "/mnt/bb586fde-943d-4653-af27-224147bfba7e/Medgemma/MedSAM2/common_data"
+
+# Gradio temp directory for file downloads (Gradio can always serve from here)
+GRADIO_TEMP_DIR = "/tmp/gradio_downloads"
+os.makedirs(GRADIO_TEMP_DIR, exist_ok=True)
+
+
+def copy_file_for_gradio_download(src_path):
+    """Copy a file to Gradio's temp directory for reliable downloads.
+    
+    Gradio 3.x has issues serving files from arbitrary paths even with allowed_paths.
+    Copying to /tmp ensures the file is accessible for download.
+    
+    Args:
+        src_path: Source file path
+    
+    Returns:
+        str: Path to the copied file in temp directory, or None if failed
+    """
+    if not src_path or not os.path.exists(src_path):
+        return None
+    try:
+        filename = os.path.basename(src_path)
+        # Add timestamp to avoid collisions
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest_filename = f"{timestamp}_{filename}"
+        dest_path = os.path.join(GRADIO_TEMP_DIR, dest_filename)
+        shutil.copy2(src_path, dest_path)
+        print(f"[DEBUG] Copied {src_path} to {dest_path} for Gradio download")
+        return dest_path
+    except Exception as e:
+        print(f"[ERROR] Failed to copy file for Gradio download: {e}")
+        return None
+
+
+# Lazy-loaded MedGemma instance (loads model in bf16 on first use)
+_medgemma_instance = None
+
+def get_medgemma_instance():
+    """Get or create the MedGemma model instance. Loads in bf16 on first call."""
+    global _medgemma_instance
+    if _medgemma_instance is None:
+        print("[INFO] Loading MedGemma model (bf16)... This may take a moment.")
+        hf_token = os.getenv("HF_TOKEN")
+        _medgemma_instance = MedGemmaSimplify(hf_token=hf_token)
+        print("[INFO] MedGemma model loaded successfully.")
+    return _medgemma_instance
 
 def get_patient_list():
     """Get list of all patient folders in common_data directory."""
@@ -1280,6 +1328,180 @@ def update_patient_json_with_parcellation(patient_id, parcellation_result):
         traceback.print_exc()
         return False
 
+def update_patient_results_json_with_medgemma(patient_id, session_id_selected, clinical_report, patient_report):
+    """Update patient's session JSON file with MedGemma results.
+    
+    Args:
+        patient_id: Patient ID
+        session_id_selected: Session ID
+        clinical_report: MedGemma clinical/radiology report string
+        patient_report: MedGemma patient-friendly report string
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        patient_folder = join(COMMON_DATA_PATH, patient_id)
+        patient_results_file = join(patient_folder, "patient_results.json")
+        
+        if not exists(patient_folder):
+            print(f"[ERROR] Patient folder not found: {patient_folder}")
+            return False
+            
+        # Load or create JSON
+        if exists(patient_results_file):
+            with open(patient_results_file, 'r') as f:
+                patient_data = json.load(f)
+        else:
+            patient_data = {}
+            
+        # Ensure session key exists
+        session_key = session_id_selected
+        if session_key not in patient_data:
+            patient_data[session_key] = {}
+            
+        # Update fields - store clinical and patient reports separately
+        patient_data[session_key]["gemma radiology report"] = clinical_report
+        patient_data[session_key]["gemma patient report"] = patient_report
+        
+        # Save updated data
+        with open(patient_results_file, 'w') as f:
+            json.dump(patient_data, f, indent=4)
+        
+        print(f"[INFO] Updated patient_results.json with both MedGemma reports for {patient_id}, session {session_id_selected}")
+        return True
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to update patient_results.json for MedGemma: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def update_comman_format_json_with_medgemma(patient_id, clinical_report, patient_report):
+    """Update comman_format.json with both MedGemma reports.
+    
+    Args:
+        patient_id: Patient ID
+        clinical_report: MedGemma clinical/radiology report string
+        patient_report: MedGemma patient-friendly report string
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Find patient's JSON file in med_gemma_sample_data
+        sample_data_path = COMMON_DATA_PATH
+        common_format_file = join(sample_data_path, "comman_format.json")
+        
+        if not exists(common_format_file):
+            print(f"[ERROR] Common format JSON not found: {common_format_file}")
+            return False
+        
+        # Load and update JSON
+        import json
+        with open(common_format_file, 'r') as f:
+            data = json.load(f)
+        
+        # Find the patient entry (using 'pid' field from comman_format.json)
+        updated = False
+        for entry in data:
+            if entry.get("pid") == patient_id:
+                entry["gemma radiology report"] = clinical_report
+                entry["gemma patient report"] = patient_report
+                updated = True
+                print(f"[INFO] Updated patient {patient_id} with both MedGemma reports in comman_format.json")
+                break
+        
+        if not updated:
+            print(f"[WARNING] Patient {patient_id} not found in comman_format.json, skipping MedGemma update for summary")
+        
+        # Save updated JSON
+        with open(common_format_file, 'w') as f:
+            json.dump(data, f, indent=2)
+        
+        print(f"[INFO] Successfully updated comman_format.json with MedGemma reports")
+        return True
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to update comman_format.json for MedGemma: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def generate_medgemma_reports(patient_id, session_id_selected, scan_name, segmentation_path, parcellation_result=None):
+    """Generate clinical and patient-friendly reports using MedGemma.
+    
+    Args:
+        patient_id: Patient ID
+        session_id_selected: Session ID
+        scan_name: Name of the scan file
+        segmentation_path: Path to segmentation NIfTI file
+        parcellation_result: Optional parcellation result string for context
+    
+    Returns:
+        tuple: (clinical_report, patient_report, clinical_docx_path, patient_docx_path)
+    """
+    try:
+        # Get MRI volume path
+        mr_volume_path = get_scan_full_path(patient_id, session_id_selected, scan_name)
+        if not exists(mr_volume_path):
+            raise FileNotFoundError(f"MRI volume not found: {mr_volume_path}")
+        
+        if not exists(segmentation_path):
+            raise FileNotFoundError(f"Segmentation file not found: {segmentation_path}")
+        
+        # Determine slice index from annotations
+        slice_index = get_slice_id_for_patient_session(patient_id, session_id_selected)
+        if slice_index is None:
+            # Fallback to middle slice
+            img = nib.load(mr_volume_path)
+            data = img.get_fdata()
+            if data.ndim == 4:
+                data = data[..., 0]
+            slice_index = data.shape[2] // 2
+            print(f"[INFO] No annotation slice found, using middle slice: {slice_index}")
+        
+        # Build manual report context from parcellation result
+        if parcellation_result:
+            manual_report_context = parcellation_result
+        else:
+            manual_report_context = "No parcellation data available. Please describe findings based on imaging alone."
+        
+        # Output paths for DOCX files
+        patient_folder = join(COMMON_DATA_PATH, patient_id)
+        os.makedirs(patient_folder, exist_ok=True)
+        clinical_docx_path = join(patient_folder, f"{patient_id}_{session_id_selected}_Clinical_MRI_Report.docx")
+        patient_docx_path = join(patient_folder, f"{patient_id}_{session_id_selected}_Patient_Friendly_Report.docx")
+        
+        # Load MedGemma and generate reports
+        simplifier = get_medgemma_instance()
+        
+        print(f"[INFO] Generating MedGemma reports for patient {patient_id}, session {session_id_selected}")
+        print(f"[INFO] MRI volume: {mr_volume_path}")
+        print(f"[INFO] Segmentation: {segmentation_path}")
+        print(f"[INFO] Slice index: {slice_index}")
+        
+        clinical_report, patient_report = simplifier.generate_reports(
+            mr_volume_path=mr_volume_path,
+            slice_index=slice_index,
+            segmentation_mask_path=segmentation_path,
+            manual_report_context=manual_report_context,
+            clinical_docx=clinical_docx_path,
+            patient_docx=patient_docx_path
+        )
+        
+        print(f"[INFO] MedGemma reports generated successfully.")
+        print(f"[INFO] Clinical report saved to: {clinical_docx_path}")
+        print(f"[INFO] Patient report saved to: {patient_docx_path}")
+        
+        return clinical_report, patient_report, clinical_docx_path, patient_docx_path
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to generate MedGemma reports: {e}")
+        traceback.print_exc()
+        return None, None, None, None
+
 def tracking_objects(session_id, seg_tracker, frame_num, input_video):
     output_dir = f'/tmp/output_frames/{session_id}'
     output_masks_dir = f'/tmp/output_masks/{session_id}'
@@ -1434,6 +1656,10 @@ def process_video(queue, result_queue, session_id):
             seg_tracker, click_stack, input_first_frame, drawing_board, frame_per, output_video, output_mp4, output_mask, ann_obj_id, max_obj_id = get_meta_from_video(session_id, input_video, scale_slider, config_path, checkpoint_path, target_slice)
             result_queue.put({"input_first_frame": input_first_frame, "drawing_board": drawing_board, "frame_per": frame_per, "output_video": output_video, "output_mp4": output_mp4, "output_mask": output_mask, "ann_obj_id": ann_obj_id, "max_obj_id": max_obj_id})
         elif task["command"] == "sam_stroke":
+            if seg_tracker is None:
+                print("[ERROR] sam_stroke called but model not initialized (seg_tracker is None). Run preprocessing first.")
+                result_queue.put({"input_first_frame": None, "drawing_board": None, "last_draw": None})
+                continue
             drawing_board = task["drawing_board"]
             last_draw = task["last_draw"]
             frame_num = task["frame_num"]
@@ -1441,6 +1667,10 @@ def process_video(queue, result_queue, session_id):
             seg_tracker, input_first_frame, drawing_board, last_draw = sam_stroke(session_id, seg_tracker, drawing_board, last_draw, frame_num, ann_obj_id)
             result_queue.put({"input_first_frame": input_first_frame, "drawing_board": drawing_board, "last_draw": last_draw})
         elif task["command"] == "sam_click":
+            if seg_tracker is None:
+                print("[ERROR] sam_click called but model not initialized (seg_tracker is None). Run preprocessing first.")
+                result_queue.put({"input_first_frame": None, "drawing_board": None, "last_draw": None})
+                continue
             frame_num = task["frame_num"]
             point_mode = task["point_mode"]
             click_stack = task["click_stack"]
@@ -1469,6 +1699,10 @@ def process_video(queue, result_queue, session_id):
             input_first_frame, drawing_board, frame_num = show_res_by_slider(session_id, frame_per, click_stack)
             result_queue.put({"input_first_frame": input_first_frame, "drawing_board": drawing_board, "frame_num": frame_num})
         elif task["command"] == "tracking_objects":
+            if seg_tracker is None:
+                print("[ERROR] tracking_objects called but model not initialized (seg_tracker is None). Run preprocessing first.")
+                result_queue.put({"input_first_frame": None, "drawing_board": None, "output_video": None, "output_mp4": None, "output_mask": None, "click_stack": ({}, {})})
+                continue
             frame_num = task["frame_num"]
             input_video = task["input_video"]
             input_first_frame, drawing_board, output_video, output_mp4, output_mask, click_stack = tracking_objects(session_id, seg_tracker, frame_num, input_video)
@@ -1557,7 +1791,13 @@ def seg_track_app():
         print(f"session_id {session_id}")
         return session_id
 
-    def handle_extract_video_info(session_id, input_video):
+    def handle_extract_video_info(session_id, input_video, skip_flag, current_slider_state):
+        # If the pipeline already preprocessed the video, skip this handler
+        # to avoid resetting the slider/frame back to 0
+        if skip_flag:
+            print("[DEBUG] handle_extract_video_info: Skipping (pipeline already handled preprocessing)")
+            return gr.Slider.update(), gr.Slider.update(), current_slider_state, gr.Image.update(), gr.Image.update(), gr.Video.update(), gr.File.update(), gr.File.update(), False
+        
         # clean_up_processes(session_id, init_clean=True)
         if input_video == None:
             return 0, 0, {
@@ -1565,7 +1805,7 @@ def seg_track_app():
             "maximum": 100,
             "step": 0.01,
             "value": 0.0,
-        }, None, None, None, None, None
+        }, None, None, None, None, None, False
         queue = start_process(session_id)
         result_queue = user_processes[session_id]["result_queue"]
         queue.put({"command": "extract_video_info", "input_video": input_video})
@@ -1591,9 +1831,9 @@ def seg_track_app():
             "step": 1.0/fps,
             "value": 0.0,
         }
-        return scale_slider, frame_per, slider_state, input_first_frame, drawing_board, output_video, output_mp4, output_mask
+        return scale_slider, frame_per, slider_state, input_first_frame, drawing_board, output_video, output_mp4, output_mask, False
 
-    def handle_get_meta_from_video(session_id, input_video, scale_slider, selected_config, selected_checkpoint, patient_info=None):
+    def handle_get_meta_from_video(session_id, input_video, scale_slider, config_path, checkpoint_path, patient_info=None):
         # Validate that a video is loaded
         if input_video is None:
             print("[ERROR] handle_get_meta_from_video: No video loaded. Please click 'Use selected scan (NIfTI) as video' first.")
@@ -1613,10 +1853,13 @@ def seg_track_app():
                 "⚠️ **Error:** No video loaded. Please click 'Use selected scan (NIfTI) as video' button first to load a scan."  # current_frame_display
             )
         
-        config_path = config_file_map[selected_config]
-        checkpoint_path = checkpoint_file_map[selected_checkpoint]
+        # Paths are now passed directly
+        # config_path = config_file_map[selected_config]
+        # checkpoint_path = checkpoint_file_map[selected_checkpoint]
         
         print(f"[DEBUG] handle_get_meta_from_video: patient_info={patient_info}")
+        print(f"[DEBUG] Using config: {config_path}")
+        print(f"[DEBUG] Using checkpoint: {checkpoint_path}")
         
         target_slice = None
         if patient_info and isinstance(patient_info, dict):
@@ -1790,111 +2033,201 @@ def seg_track_app():
         click_stack = result.get("click_stack")
         return input_first_frame, drawing_board, output_video, output_mp4, output_mask, click_stack
     
-    def handle_convert_to_nifti(session_id, patient_info, ann_obj_id):
-        """Convert segmented masks to NIfTI format, calculate volume, and run parcellation."""
+    def load_existing_reports(patient_info):
+        """Load existing analysis reports from patient_results.json and comman_format.json.
+        
+        Returns: (nifti_status, clinical_report, patient_report)
+        """
         if not (patient_info and isinstance(patient_info, dict)):
-            return None, "❌ Error: No scan selected. Please select a scan first.", None
+            return "*No patient selected.*", "*No report available.*", "*No report available.*"
         
         patient_id = patient_info.get("patient_id")
-        session_id_selected = patient_info.get("session_id")
-        scan_name = patient_info.get("scan_name")
+        session_id_sel = patient_info.get("session_id")
         
-        if not (patient_id and session_id_selected and scan_name):
-            return None, "❌ Error: Incomplete scan information.", None
+        if not patient_id:
+            return "*No patient selected.*", "*No report available.*", "*No report available.*"
         
-        original_nifti_path = get_scan_full_path(patient_id, session_id_selected, scan_name)
+        nifti_status_text = ""
+        clinical_report_text = "*No report available yet.*"
+        patient_report_text = "*No report available yet.*"
         
-        if not os.path.exists(original_nifti_path):
-            return None, f"❌ Error: Original NIfTI file not found: {original_nifti_path}", None
-        
-        queue = start_process(session_id)
-        result_queue = user_processes[session_id]["result_queue"]
-        queue.put({
-            "command": "convert_to_nifti",
-            "original_nifti_path": original_nifti_path,
-            "obj_id": ann_obj_id,
-            "patient_id": patient_id,
-            "session_id_selected": session_id_selected
-        })
-        result = result_queue.get()
-        
-        if result.get("success"):
-            output_nifti_path = result.get("output_nifti_path")
-            volume_ml = result.get("volume_ml")
-            voxel_count = result.get("voxel_count")
-            report_path = result.get("report_path")
-            patient_seg_path = result.get("patient_seg_path")
-            
-            # Build the comprehensive report
-            status_msg = f"# Segmentation and Volume Analysis Report\n\n"
-            status_msg += f"## Patient Information\n"
-            status_msg += f"- **Patient ID:** {patient_id}\n"
-            status_msg += f"- **Session ID:** {session_id_selected}\n"
-            status_msg += f"- **Scan:** {scan_name}\n\n"
-            
-            status_msg += f"## Segmentation Results\n"
-            status_msg += f"- **Object ID:** {ann_obj_id}\n"
-            status_msg += f"- **Segmented Voxels:** {voxel_count:,}\n"
-            status_msg += f"- **Total Volume:** {volume_ml:.2f} mL\n\n"
-            
-            # Read and display volume report
-            if report_path and os.path.exists(report_path):
-                try:
-                    with open(report_path, 'r') as f:
-                        volume_report_content = f.read()
-                    status_msg += f"## Detailed Volume Report\n```\n{volume_report_content}\n```\n\n"
-                except Exception as e:
-                    print(f"[ERROR] Failed to read volume report: {e}")
-                    status_msg += f"⚠️ Could not read volume report from `{report_path}`\n\n"
-            
-            status_msg += f"## File Locations\n"
-            status_msg += f"- **Segmentation (temp):** `{output_nifti_path}`\n"
-            if patient_seg_path:
-                status_msg += f"- **Segmentation (patient folder):** `{patient_seg_path}`\n"
-            status_msg += f"- **Volume Report:** `{report_path}`\n\n"
-            
-            # Run parcellation analysis if segmentation was saved to patient folder
-            if patient_seg_path and os.path.exists(patient_seg_path):
-                status_msg += "---\n\n"
-                status_msg += "🔄 **Running parcellation analysis...**\n\n"
-                parcellation_result, parcellation_path = run_parcellation_analysis(patient_id, session_id_selected, patient_seg_path)
+        # 1. Try to read from patient_results.json (session-specific, most detailed)
+        try:
+            patient_folder = join(COMMON_DATA_PATH, patient_id)
+            results_file = join(patient_folder, "patient_results.json")
+            if exists(results_file):
+                with open(results_file, 'r') as f:
+                    results_data = json.load(f)
                 
-                if parcellation_result:
-                    status_msg += f"## Parcellation Analysis Results\n\n"
-                    status_msg += f"**Summary:** {parcellation_result}\n\n"
+                session_data = results_data.get(session_id_sel, {}) if session_id_sel else {}
+                
+                # Quantitative report (manual report from SAM)
+                sam_report = session_data.get("manual report from SAM", "")
+                if sam_report:
+                    nifti_status_text = f"### 📊 Existing Analysis (from records)\n\n"
+                    nifti_status_text += f"**Patient:** {patient_id} | **Session:** {session_id_sel}\n\n"
+                    nifti_status_text += f"**Quantitative Report:** {sam_report}\n\n"
                     
-                    # Read and display parcellation report
-                    if parcellation_path and os.path.exists(parcellation_path):
-                        try:
-                            with open(parcellation_path, 'r') as f:
-                                parcellation_report_content = f.read()
-                            status_msg += f"### Detailed Parcellation Report\n```\n{parcellation_report_content}\n```\n\n"
-                        except Exception as e:
-                            print(f"[ERROR] Failed to read parcellation report: {e}")
-                            status_msg += f"⚠️ Could not read parcellation report from `{parcellation_path}`\n\n"
-                    
-                    # Update patient_results.json (session-specific)
-                    if update_patient_results_json(patient_id, session_id_selected, parcellation_result, patient_seg_path, parcellation_path):
-                        status_msg += "✅ **Updated patient_results.json**\n"
-                    else:
-                        status_msg += "⚠️ **Warning: Failed to update patient_results.json**\n"
-                    
-                    # Update comman_format.json (patient-level)
-                    if update_patient_json_with_parcellation(patient_id, parcellation_result):
-                        status_msg += "✅ **Updated comman_format.json**\n"
-                    else:
-                        status_msg += "⚠️ **Warning: Failed to update comman_format.json**\n"
-                    
+                    # Add parcellation file info if available
+                    parcellation_path = session_data.get("parcellation file path", "")
+                    seg_path = session_data.get("SAM segmentation file path", "")
+                    if seg_path:
+                        nifti_status_text += f"**Segmentation File:** `{seg_path}`\n"
                     if parcellation_path:
-                        status_msg += f"\n**Parcellation Report File:** `{parcellation_path}`\n"
-                else:
-                    status_msg += "## Parcellation Analysis\n\n"
-                    status_msg += "⚠️ **Warning: Parcellation analysis failed**\n"
+                        nifti_status_text += f"**Parcellation File:** `{parcellation_path}`\n"
+                
+                # MedGemma clinical / radiology report
+                gemma_clinical = session_data.get("gemma radiology report", "")
+                if gemma_clinical:
+                    clinical_report_text = gemma_clinical
+                
+                # MedGemma patient report
+                gemma_patient = session_data.get("gemma patient report", "")
+                if gemma_patient:
+                    patient_report_text = gemma_patient
+                    
+                print(f"[INFO] Loaded existing reports from patient_results.json for {patient_id}/{session_id_sel}")
+        except Exception as e:
+            print(f"[WARNING] Could not read patient_results.json: {e}")
+        
+        # 2. Fall back to comman_format.json for patient-level data if session data was empty
+        if clinical_report_text == "*No report available yet.*":
+            try:
+                comman_file = join(COMMON_DATA_PATH, "comman_format.json")
+                if exists(comman_file):
+                    with open(comman_file, 'r') as f:
+                        comman_data = json.load(f)
+                    for entry in comman_data:
+                        if entry.get("pid") == patient_id:
+                            gemma_report = entry.get("gemma patient report", "")
+                            if gemma_report:
+                                clinical_report_text = gemma_report
+                            
+                            sam_report_comman = entry.get("manual report from SAM", "")
+                            if sam_report_comman and not nifti_status_text:
+                                nifti_status_text = f"### 📊 Existing Analysis (from records)\n\n"
+                                nifti_status_text += f"**Patient:** {patient_id}\n\n"
+                                nifti_status_text += f"**Quantitative Report:** {sam_report_comman}\n"
+                            break
+                    print(f"[INFO] Loaded existing reports from comman_format.json for {patient_id}")
+            except Exception as e:
+                print(f"[WARNING] Could not read comman_format.json: {e}")
+        
+        if not nifti_status_text:
+            nifti_status_text = "*No existing analysis found. Complete segmentation and tracking, then run analysis.*"
+        
+        return nifti_status_text, clinical_report_text, patient_report_text
+
+    def handle_convert_to_nifti(session_id, patient_info, ann_obj_id):
+        """Convert segmented masks to NIfTI format, calculate volume, and run parcellation."""
+        try:
+            if not (patient_info and isinstance(patient_info, dict)):
+                return None, "❌ Error: No scan selected. Please select a scan first.", None
             
-            return output_nifti_path, status_msg, report_path
-        else:
-            error_msg = result.get("error", "Unknown error")
-            return None, f"❌ **Conversion Failed:** {error_msg}", None
+            patient_id = patient_info.get("patient_id")
+            session_id_selected = patient_info.get("session_id")
+            scan_name = patient_info.get("scan_name")
+            
+            if not (patient_id and session_id_selected and scan_name):
+                return None, "❌ Error: Incomplete scan information.", None
+            
+            original_nifti_path = get_scan_full_path(patient_id, session_id_selected, scan_name)
+            
+            if not os.path.exists(original_nifti_path):
+                return None, f"❌ Error: Original NIfTI file not found: {original_nifti_path}", None
+            
+            queue = start_process(session_id)
+            result_queue = user_processes[session_id]["result_queue"]
+            queue.put({
+                "command": "convert_to_nifti",
+                "original_nifti_path": original_nifti_path,
+                "obj_id": ann_obj_id,
+                "patient_id": patient_id,
+                "session_id_selected": session_id_selected
+            })
+            result = result_queue.get()
+            
+            if result.get("success"):
+                output_nifti_path = result.get("output_nifti_path")
+                volume_ml = result.get("volume_ml")
+                voxel_count = result.get("voxel_count")
+                report_path = result.get("report_path")
+                patient_seg_path = result.get("patient_seg_path")
+                
+                # Build the comprehensive report
+                status_msg = f"# Segmentation and Volume Analysis Report\n\n"
+                status_msg += f"## Patient Information\n"
+                status_msg += f"- **Patient ID:** {patient_id}\n"
+                status_msg += f"- **Session ID:** {session_id_selected}\n"
+                status_msg += f"- **Scan:** {scan_name}\n\n"
+                
+                status_msg += f"## Segmentation Results\n"
+                status_msg += f"- **Object ID:** {ann_obj_id}\n"
+                status_msg += f"- **Segmented Voxels:** {voxel_count:,}\n"
+                status_msg += f"- **Total Volume:** {volume_ml:.2f} mL\n\n"
+                
+                # Read and display volume report
+                if report_path and os.path.exists(report_path):
+                    try:
+                        with open(report_path, 'r') as f:
+                            volume_report_content = f.read()
+                        status_msg += f"## Detailed Volume Report\n```\n{volume_report_content}\n```\n\n"
+                    except Exception as e:
+                        print(f"[ERROR] Failed to read volume report: {e}")
+                        status_msg += f"⚠️ Could not read volume report from `{report_path}`\n\n"
+                
+                status_msg += f"## File Locations\n"
+                status_msg += f"- **Segmentation (temp):** `{output_nifti_path}`\n"
+                if patient_seg_path:
+                    status_msg += f"- **Segmentation (patient folder):** `{patient_seg_path}`\n"
+                status_msg += f"- **Volume Report:** `{report_path}`\n\n"
+                
+                # Run parcellation analysis if segmentation was saved to patient folder
+                if patient_seg_path and os.path.exists(patient_seg_path):
+                    status_msg += "---\n\n"
+                    status_msg += "🔄 **Running parcellation analysis...**\n\n"
+                    parcellation_result, parcellation_path = run_parcellation_analysis(patient_id, session_id_selected, patient_seg_path)
+                    
+                    if parcellation_result:
+                        status_msg += f"## Parcellation Analysis Results\n\n"
+                        status_msg += f"**Summary:** {parcellation_result}\n\n"
+                        
+                        # Read and display parcellation report
+                        if parcellation_path and os.path.exists(parcellation_path):
+                            try:
+                                with open(parcellation_path, 'r') as f:
+                                    parcellation_report_content = f.read()
+                                status_msg += f"### Detailed Parcellation Report\n```\n{parcellation_report_content}\n```\n\n"
+                            except Exception as e:
+                                print(f"[ERROR] Failed to read parcellation report: {e}")
+                                status_msg += f"⚠️ Could not read parcellation report from `{parcellation_path}`\n\n"
+                        
+                        # Update patient_results.json (session-specific)
+                        if update_patient_results_json(patient_id, session_id_selected, parcellation_result, patient_seg_path, parcellation_path):
+                            status_msg += "✅ **Updated patient_results.json**\n"
+                        else:
+                            status_msg += "⚠️ **Warning: Failed to update patient_results.json**\n"
+                        
+                        # Update comman_format.json (patient-level)
+                        if update_patient_json_with_parcellation(patient_id, parcellation_result):
+                            status_msg += "✅ **Updated comman_format.json**\n"
+                        else:
+                            status_msg += "⚠️ **Warning: Failed to update comman_format.json**\n"
+                        
+                        if parcellation_path:
+                            status_msg += f"\n**Parcellation Report File:** `{parcellation_path}`\n"
+                    else:
+                        status_msg += "## Parcellation Analysis\n\n"
+                        status_msg += "⚠️ **Warning: Parcellation analysis failed**\n"
+                
+                return output_nifti_path, status_msg, report_path
+            else:
+                error_msg = result.get("error", "Unknown error")
+                return None, f"❌ **Conversion Failed:** {error_msg}", None
+        except Exception as e:
+            print(f"[CRITICAL ERROR] Exception in handle_convert_to_nifti: {e}")
+            traceback.print_exc()
+            return None, f"❌ **Error during conversion:** {str(e)}", None
     
     def handle_use_selected_nifti_as_video(session_id_val, patient_info):
         """Convert selected NIfTI scan into a video and load it.
@@ -1958,8 +2291,11 @@ def seg_track_app():
 
         medsam_checkpoints = glob("checkpoints/*.pt")
     else:
-        config_path = "/" + os.path.abspath(os.environ.get("CONFIG_PATH", "./sam2/configs/"))
-        checkpoint_path = os.environ.get("CHECKPOINT_PATH", "./checkpoints")
+        # Resolve paths relative to the project root (parent of gemma3s/)
+        # NOTE: Hydra requires absolute paths to start with '//' to be treated as filesystem-absolute
+        _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        config_path = "/" + os.environ.get("CONFIG_PATH", os.path.join(_project_root, "sam2", "configs"))
+        checkpoint_path = os.environ.get("CHECKPOINT_PATH", os.path.join(_project_root, "checkpoints"))
 
         config_files = glob(os.path.join(config_path, "*.yaml"))
         config_files.sort(key=lambda x: '_t.' not in basename(x))
@@ -1967,7 +2303,7 @@ def seg_track_app():
         checkpoint_files = glob(os.path.join(checkpoint_path, "*.pt"))
         checkpoint_files.sort(key=lambda x: 'tiny' not in basename(x))
 
-        medsam_checkpoints = glob("./checkpoints/*.pt")
+        medsam_checkpoints = glob(os.path.join(_project_root, "checkpoints", "*.pt"))
 
     config_display = [splitext(basename(f))[0] for f in config_files]
     medsam_display = [
@@ -2006,6 +2342,7 @@ def seg_track_app():
         session_id = gr.State()
         selected_scan_path = gr.State(value=None)
         selected_patient_info = gr.State(value={})
+        skip_video_change = gr.State(value=False)
         
         app.load(extract_session_id_from_request, None, session_id)
         
@@ -2168,21 +2505,9 @@ def seg_track_app():
                         # Video input (either uploaded or auto-generated from NIfTI)
                         input_video = gr.Video(
                             label='Input video',
-                            type=["mp4", "mov", "avi"],
                             elem_id="input_output_video",
                         )
                         with gr.Row():
-                            config_dropdown = gr.Dropdown(
-                                choices=config_display,
-                                value=config_display[0],
-                                label="Select Config File",
-                            )
-
-                            checkpoint_dropdown = gr.Dropdown(
-                                choices=checkpoint_display,
-                                value=checkpoint_display[0],
-                                label="Select Checkpoint File",
-                            )
                             scale_slider = gr.Slider(
                                 label="Downsample Frame Rate (fps)",
                                 minimum=0.0,
@@ -2191,16 +2516,12 @@ def seg_track_app():
                                 value=1.0,
                                 interactive=True,
                             )
-                            preprocess_button = gr.Button(
-                                value="Preprocess",
-                                interactive=True,
-                            )
-                        # Button to use selected NIfTI scan as the video input
-                        use_nifti_button = gr.Button(
-                            value="Use selected scan (NIfTI) as video",
-                            variant="secondary",
-                            interactive=True,
-                        )
+                            
+                            # Hidden components for compatibility if needed (or just removed)
+                            # config_dropdown, checkpoint_dropdown removed locally
+                            # preprocess_button removed completely
+                        
+                        # use_nifti_button removed completely
 
                         with gr.Row():
                             tab_stroke = gr.Tab(label="Stroke to Box Prompt")
@@ -2211,7 +2532,7 @@ def seg_track_app():
                                     
                             tab_click = gr.Tab(label="Point Prompt")
                             with tab_click:
-                                input_first_frame = gr.Image(label='Segment result / Input image',interactive=True).style(height=550)
+                                input_first_frame = gr.Image(label='Segment result / Input image', interactive=True, height=550)
                                 with gr.Row():
                                     point_mode = gr.Radio(
                                                 choices=["Positive",  "Negative"],
@@ -2264,20 +2585,6 @@ def seg_track_app():
                         output_mask = gr.File(label="Predicted masks")
 
 
-                        # NIfTI conversion section (moved below tracking button)
-                        gr.Markdown("---")
-                        gr.Markdown("### 📦 Export Segmentation to NIfTI")
-                        gr.Markdown("After tracking is complete, convert the segmented masks back to NIfTI format and calculate volume.")
-                        
-                        convert_to_nifti_btn = gr.Button("🔄 Convert to NIfTI & Calculate Volume", variant="primary")
-                        
-                        nifti_status = gr.Markdown("")
-                        
-                        with gr.Row():
-                            output_nifti_file = gr.File(label="Segmentation NIfTI", interactive=False, file_count="single", scale=0.5)
-                            output_report_file = gr.File(label="Volume Report", interactive=False, file_count="single", scale=0.5)
-
-
                 gr.Markdown(
                     '''
                     <div style="text-align:center; margin-top: 20px;">
@@ -2287,6 +2594,49 @@ def seg_track_app():
                     </div>
                         '''
                 )
+
+            # ==================== ANALYSIS & REPORTING TAB ====================
+            with gr.Tab("📊 Analysis & Reporting", id=2) as analysis_tab:
+                gr.Markdown("""
+                ### 📦 Analysis & Reporting Dashboard
+                Run quantitative volume analysis and generate AI-powered clinical reports.  
+                **Note:** Complete segmentation and tracking on the Segmentation tab before using these tools.
+                """)
+                
+                with gr.Row():
+                    # ---- Left Column: Quantitative Analysis ----
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 📊 Quantitative Analysis")
+                        gr.Markdown("Convert segmentation masks to NIfTI format and calculate volume statistics.")
+                        convert_to_nifti_btn = gr.Button("🔄 Convert & Calculate", variant="primary")
+                        
+                        gr.Markdown("---")
+                        gr.Markdown("#### Analysis Report")
+                        nifti_status = gr.Markdown("*No analysis run yet. Click the button above after completing segmentation.*")
+                        
+                        with gr.Row():
+                            output_nifti_file = gr.File(label="Segmentation NIfTI", interactive=False, file_count="single")
+                            output_report_file = gr.File(label="Volume Report", interactive=False, file_count="single")
+
+                    # ---- Right Column: Qualitative Analysis (MedGemma) ----
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 🧠 Qualitative Analysis (MedGemma)")
+                        gr.Markdown("Generate AI-powered clinical and patient-friendly reports.")
+                        generate_reports_btn = gr.Button("✨ Generate AI Reports", variant="primary")
+                        medgemma_status = gr.Markdown("")
+                        
+                        gr.Markdown("---")
+                        gr.Markdown("#### 📋 Clinical Report")
+                        clinical_report_display = gr.Markdown("*No report generated yet. Click 'Generate AI Reports' above.*")
+                        
+                        gr.Markdown("---")
+                        gr.Markdown("#### 💬 Patient-Friendly Report")
+                        patient_report_display = gr.Markdown("*No report generated yet.*")
+                        
+                        gr.Markdown("---")
+                        with gr.Row():
+                            clinical_docx_file = gr.File(label="Clinical DOCX", interactive=False, file_count="single")
+                            patient_docx_file = gr.File(label="Patient DOCX", interactive=False, file_count="single")
 
         ##########################################################
         ######################  back-end #########################
@@ -2364,11 +2714,16 @@ def seg_track_app():
                 "scan_name": scan_name
             }
             
+            # Get slice ID from JSON
+            slice_id = get_slice_id_for_patient_session(patient_id, session_id)
+            slice_id_display = str(slice_id) if slice_id is not None else "N/A"
+            
             # Create info text
             info_text = f"""### 📊 Current Scan Information
 **Patient ID:** {patient_id}  
 **Session:** {session_id}  
 **Scan:** {scan_name}  
+**Slice ID (from JSON):** {slice_id_display}  
 **Tumor Status:** {'Tumor Present' if patient.get('tumor', False) else 'Normal'}  
 **Confidence Score:** {patient.get('conf_score', 0.0):.2f}  
 **Reviewed by Radiologist:** {'Yes' if patient.get('reviewed_by_radio', False) else 'No'}  
@@ -2438,6 +2793,87 @@ def seg_track_app():
             """Navigate back to patient selection tab and reset dropdown."""
             return gr.Tabs.update(selected=0), gr.Dropdown.update(value=None)
 
+        def auto_load_patient_pipeline(selected_value, patient_data_list, scale_slider_val, gradio_session_id):
+            """
+            Automated pipeline:
+            1. Select Patient -> Get Info & Path
+            2. Convert NIfTI to Video
+            3. Preprocess Video (Load Config/Checkpoint)
+            """
+            # 1. Select Patient
+            tabs_update, info_text, patient_info = handle_patient_selection_from_dropdown(selected_value, patient_data_list)
+            
+            # Default empty returns for pipeline failure
+            empty_meta = (
+                None, None, gr.Slider.update(), 
+                {"minimum": 0.0, "maximum": 100, "step": 0.01, "value": 0.0}, 
+                None, None, None, 0, 0, gr.Slider.update(), 0, ""
+            )
+            
+            # Check for error in step 1
+            if isinstance(info_text, str) and info_text.startswith("❌"):
+                return (
+                    tabs_update, info_text, patient_info, 
+                    False,  # skip_video_change
+                    gr.Video.update(value=None),
+                    *empty_meta
+                )
+
+            # Extract correct session_id from the new patient info
+            # logic in handle_patient_selection_from_dropdown sets this
+            updated_session_id = patient_info.get("session_id")
+            
+            # 2. Convert NIfTI to Video
+            video_update = handle_use_selected_nifti_as_video(updated_session_id, patient_info)
+            
+            video_path = None
+            if isinstance(video_update, dict) and "value" in video_update:
+                video_path = video_update["value"]
+            
+            if not video_path:
+                 return (
+                    tabs_update, info_text + "\n\n❌ **Error:** Failed to convert NIfTI to video.", patient_info, 
+                    False,  # skip_video_change
+                    video_update,
+                    *empty_meta
+                )
+
+            # 3. Preprocess Video
+            # Hardcoded paths as requested
+            # IMPORTANT: Hydra requires absolute paths to start with '//' (double slash) to be treated as filesystem-absolute
+            # Reference: Original code at line 2151-2153
+            if platform.system() == "Windows":
+                checkpoint_path = os.path.abspath("checkpoints/MedSAM2_latest.pt")
+                # For Windows, check if we need special handling
+                _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+                config_path = "/" + os.path.join(_project_root, "sam2", "configs", "sam2.1_hiera_t512.yaml")
+            else:
+                _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+                checkpoint_path = os.path.join(_project_root, "checkpoints", "MedSAM2_latest.pt")
+                # Prepend '/' to make Hydra treat this as filesystem-absolute
+                config_path = "/" + os.path.join(_project_root, "sam2", "configs", "sam2.1_hiera_t512.yaml")
+            
+            # Ensure checkpoint exists
+            if not os.path.exists(checkpoint_path):
+                 print(f"[ERROR] Checkpoint not found at {checkpoint_path}")
+
+            # For NIfTI-sourced videos, each frame = one slice.
+            # The video is created at 24fps, so we must set scale_slider = 24
+            # to ensure frame_interval = max(1, int(fps // scale_slider)) = 1,
+            # i.e. every single slice/frame is extracted and used.
+            nifti_scale_slider = 24.0
+
+            meta_results = handle_get_meta_from_video(
+                gradio_session_id, video_path, nifti_scale_slider, config_path, checkpoint_path, patient_info
+            )
+            
+            return (
+                tabs_update, info_text, patient_info, 
+                True,   # skip_video_change - prevent input_video.change from resetting slider
+                video_update,
+                *meta_results
+            )
+
         # Connect patient selection events
         refresh_table_btn.click(
             fn=load_patient_summary_table,
@@ -2445,13 +2881,24 @@ def seg_track_app():
             outputs=[patient_summary_table, patient_data_state, patient_selection_dropdown]
         )
         
-        # Connect the "Go to Segmentation" button to load the selected patient
-        go_to_segmentation_btn.click(
-            fn=handle_patient_selection_from_dropdown,
-            inputs=[patient_selection_dropdown, patient_data_state],
-            outputs=[main_tabs, current_scan_info, selected_patient_info]
+        # Connect the dropdown change event to the full automation pipeline
+        patient_selection_dropdown.change(
+            fn=auto_load_patient_pipeline,
+            inputs=[patient_selection_dropdown, patient_data_state, scale_slider, session_id],
+            outputs=[
+                main_tabs, current_scan_info, selected_patient_info, # Step 1
+                skip_video_change,  # Flag to prevent input_video.change from resetting
+                input_video, # Step 2
+                # Step 3 (Meta results)
+                input_first_frame, drawing_board, frame_per, slider_state, output_video, output_mp4, output_mask, ann_obj_id, max_obj_id, obj_id_slider, frame_num, current_frame_display
+            ]
+        ).then(
+            fn=load_existing_reports,
+            inputs=[selected_patient_info],
+            outputs=[nifti_status, clinical_report_display, patient_report_display]
         )
         
+        # Legacy/Other connections
         back_to_patients_btn.click(
             fn=navigate_to_patients,
             inputs=[],
@@ -2463,22 +2910,6 @@ def seg_track_app():
             fn=load_patient_summary_table,
             inputs=[],
             outputs=[patient_summary_table, patient_data_state, patient_selection_dropdown]
-        )
-
-        # listen to the preprocess button click to get the first frame of video with scaling
-        preprocess_button.click(
-            fn=handle_get_meta_from_video,
-            inputs=[
-                session_id,
-                input_video,
-                scale_slider,
-                config_dropdown,
-                checkpoint_dropdown,
-                selected_patient_info
-            ],
-            outputs=[
-                input_first_frame, drawing_board, frame_per, slider_state, output_video, output_mp4, output_mask, ann_obj_id, max_obj_id, obj_id_slider, frame_num, current_frame_display
-            ], queue=False, every=15
         )
 
         frame_per.release(
@@ -2503,7 +2934,7 @@ def seg_track_app():
         )
 
         # Track object in video
-        track_for_video.click(
+        tracking_event = track_for_video.click(
             fn=handle_tracking_objects,
             inputs=[
                 session_id,
@@ -2558,17 +2989,153 @@ def seg_track_app():
 
         input_video.change(
             fn=handle_extract_video_info,
-            inputs=[session_id, input_video],
-            outputs=[scale_slider, frame_per, slider_state, input_first_frame, drawing_board, output_video, output_mp4, output_mask], queue=False, every=15
+            inputs=[session_id, input_video, skip_video_change, slider_state],
+            outputs=[scale_slider, frame_per, slider_state, input_first_frame, drawing_board, output_video, output_mp4, output_mask, skip_video_change], queue=False, every=15
         )
         
-        # Button to convert the selected NIfTI scan into a video and load it
-        use_nifti_button.click(
-            fn=handle_use_selected_nifti_as_video,
-            inputs=[session_id, selected_patient_info],
-            outputs=[input_video],
-        )
+        # use_nifti_button.click removed
         
+        # MedGemma AI report generation handler
+        def handle_generate_medgemma_reports(patient_info, progress=gr.Progress()):
+            """Generate clinical and patient-friendly reports using MedGemma."""
+            def safe_progress(val, desc=""):
+                try:
+                    progress(val, desc=desc)
+                except Exception:
+                    pass  # Progress not available in this context
+            try:
+                safe_progress(0, "Initializing...")
+                if not (patient_info and isinstance(patient_info, dict)):
+                    return "❌ **Error:** No scan selected. Please select a patient and complete segmentation first.", \
+                           "*No report generated.*", "*No report generated.*", None, None
+                
+                patient_id = patient_info.get("patient_id")
+                session_id_selected = patient_info.get("session_id")
+                scan_name = patient_info.get("scan_name")
+                
+                if not (patient_id and session_id_selected and scan_name):
+                    return "❌ **Error:** Incomplete scan information.", \
+                           "*No report generated.*", "*No report generated.*", None, None
+                
+                # Look for the segmentation file in patient folder
+                patient_folder = join(COMMON_DATA_PATH, patient_id)
+                segmentation_path = join(patient_folder, f"{patient_id}_{session_id_selected}_seg.nii.gz")
+                
+                if not os.path.exists(segmentation_path):
+                    return (
+                        "❌ **Error:** Segmentation file not found. "
+                        "Please complete segmentation and click 'Convert to NIfTI & Calculate Volume' first.\n\n"
+                        f"Expected file: `{segmentation_path}`",
+                        "*No report generated.*", "*No report generated.*", None, None
+                    )
+                
+                # Try to get parcellation result from patient_results.json
+                progress(0.1, desc="Reading context...")
+                parcellation_result = None
+                try:
+                    patient_results_file = join(patient_folder, "patient_results.json")
+                    if exists(patient_results_file):
+                        with open(patient_results_file, 'r') as f:
+                            results_data = json.load(f)
+                        session_data = results_data.get(session_id_selected, {})
+                        parcellation_result = session_data.get("manual report from SAM", None)
+                        print(f"[INFO] Found parcellation context: {parcellation_result}")
+                except Exception as e:
+                    print(f"[WARNING] Could not read parcellation result: {e}")
+                
+                # Generate reports
+                safe_progress(0.2, desc="Loading Model (may take 60s)...")
+                status_msg = "🔄 **Generating reports with MedGemma...**\n\n"
+                
+                safe_progress(0.4, desc="Generating Reports...")
+                try:
+                    clinical_report, patient_report, clinical_docx_path, patient_docx_path = generate_medgemma_reports(
+                        patient_id, session_id_selected, scan_name, segmentation_path, parcellation_result
+                    )
+                except Exception as gen_error:
+                    print(f"[ERROR] generate_medgemma_reports failed: {gen_error}")
+                    traceback.print_exc()
+                    return (
+                        f"❌ **Error:** Failed to generate MedGemma reports.\n\n**Details:** {str(gen_error)}",
+                        "*Report generation failed.*", "*Report generation failed.*", 
+                        None, None
+                    )
+                
+                safe_progress(0.9, desc="Finalizing...")
+                
+                if clinical_report is None or patient_report is None:
+                    return (
+                        "❌ **Error:** Failed to generate MedGemma reports. Check the console for details.",
+                        "*Report generation failed.*", "*Report generation failed.*", 
+                        None, None
+                    )
+                
+                # Ensure reports are strings
+                clinical_report_str = str(clinical_report) if clinical_report else "*No clinical report generated.*"
+                patient_report_str = str(patient_report) if patient_report else "*No patient report generated.*"
+                
+                # Update JSON files with both reports
+                safe_progress(0.95, desc="Updating records...")
+                json_status = ""
+                
+                # Update patient_results.json (session level)
+                if update_patient_results_json_with_medgemma(patient_id, session_id_selected, clinical_report_str, patient_report_str):
+                    json_status += "✅ **Updated patient_results.json**\n"
+                else:
+                    json_status += "⚠️ **Warning: Failed to update patient_results.json**\n"
+
+                # Update comman_format.json (patient level)
+                if update_comman_format_json_with_medgemma(patient_id, clinical_report_str, patient_report_str):
+                    json_status += "✅ **Updated comman_format.json**\n"
+                else:
+                    json_status += "⚠️ **Warning: Failed to update comman_format.json**\n"
+                
+                status_msg = f"✅ **MedGemma reports generated successfully!**\n\n"
+                status_msg += f"- **Patient:** {patient_id}\n"
+                status_msg += f"- **Session:** {session_id_selected}\n"
+                
+                if clinical_docx_path and os.path.exists(clinical_docx_path):
+                    status_msg += f"- **Clinical Report:** `{clinical_docx_path}`\n"
+                if patient_docx_path and os.path.exists(patient_docx_path):
+                    status_msg += f"- **Patient Report:** `{patient_docx_path}`\n"
+                
+                status_msg += f"\n**Record Updates:**\n{json_status}"
+                
+                safe_progress(1.0, "Done!")
+                
+                # Debug: log exactly what we're returning
+                print(f"[DEBUG] Return status_msg length: {len(status_msg)}")
+                print(f"[DEBUG] Return clinical_report length: {len(clinical_report_str)}")
+                print(f"[DEBUG] Return patient_report length: {len(patient_report_str)}")
+                print(f"[DEBUG] Return clinical_docx_path: {clinical_docx_path}")
+                print(f"[DEBUG] Return patient_docx_path: {patient_docx_path}")
+                print(f"[DEBUG] clinical_docx exists: {os.path.exists(clinical_docx_path) if clinical_docx_path else 'None'}")
+                print(f"[DEBUG] patient_docx exists: {os.path.exists(patient_docx_path) if patient_docx_path else 'None'}")
+                
+                # Copy files to Gradio temp directory for reliable downloads
+                clinical_file_result = copy_file_for_gradio_download(clinical_docx_path)
+                patient_file_result = copy_file_for_gradio_download(patient_docx_path)
+                
+                print(f"[DEBUG] About to return from handle_generate_medgemma_reports")
+                print(f"[DEBUG] clinical_file_result: {clinical_file_result}")
+                print(f"[DEBUG] patient_file_result: {patient_file_result}")
+                return (
+                    status_msg,
+                    clinical_report_str,
+                    patient_report_str,
+                    clinical_file_result,
+                    patient_file_result
+                )
+
+            except Exception as e:
+                print(f"[CRITICAL ERROR] Exception in handle_generate_medgemma_reports: {e}")
+                traceback.print_exc()
+                return (
+                    f"❌ **Critical Error:** {str(e)}",
+                    "*Error occurred.*", "*Error occurred.*", 
+                    None, None
+                )
+
         # Button to convert segmentation masks back to NIfTI
         convert_to_nifti_btn.click(
             fn=handle_convert_to_nifti,
@@ -2576,8 +3143,149 @@ def seg_track_app():
             outputs=[output_nifti_file, nifti_status, output_report_file]
         )
         
+
+
+
+        # Wrapper for auto-chain: regular function (not generator) for .then() chain compatibility
+        def auto_generate_medgemma_reports(patient_info):
+            """Auto-chain wrapper for handle_generate_medgemma_reports without progress bar.
+            
+            NOTE: This MUST be a regular function (not a generator) for .then() chains to work
+            properly in Gradio 3.38.0. Generator functions with yield break the chain.
+            """
+            try:
+                if not (patient_info and isinstance(patient_info, dict)):
+                    return ("⏭️ Skipped AI report generation (no patient selected).",
+                            "*No report generated.*", "*No report generated.*", None, None)
+                
+                patient_id = patient_info.get("patient_id")
+                session_id_selected = patient_info.get("session_id")
+                scan_name = patient_info.get("scan_name")
+                
+                if not (patient_id and session_id_selected and scan_name):
+                    return ("⏭️ Skipped AI report generation (incomplete scan info).",
+                            "*No report generated.*", "*No report generated.*", None, None)
+                
+                # Look for the segmentation file
+                patient_folder = join(COMMON_DATA_PATH, patient_id)
+                segmentation_path = join(patient_folder, f"{patient_id}_{session_id_selected}_seg.nii.gz")
+                
+                if not os.path.exists(segmentation_path):
+                    return (
+                        f"⏭️ Skipped AI report generation (no segmentation file found).\n\n"
+                        f"Expected: `{segmentation_path}`",
+                        "*No report generated.*", "*No report generated.*", None, None
+                    )
+
+                # Get parcellation context
+                parcellation_result = None
+                try:
+                    patient_results_file = join(patient_folder, "patient_results.json")
+                    if exists(patient_results_file):
+                        with open(patient_results_file, 'r') as f:
+                            results_data = json.load(f)
+                        session_data = results_data.get(session_id_selected, {})
+                        parcellation_result = session_data.get("manual report from SAM", None)
+                except Exception as e:
+                    print(f"[WARNING] Could not read parcellation result: {e}")
+                
+                # Generate reports
+                print(f"[AUTO-CHAIN] Generating MedGemma reports for {patient_id}/{session_id_selected}...")
+                try:
+                    clinical_report, patient_report, clinical_docx_path, patient_docx_path = generate_medgemma_reports(
+                        patient_id, session_id_selected, scan_name, segmentation_path, parcellation_result
+                    )
+                except Exception as gen_error:
+                    print(f"[AUTO-CHAIN ERROR] generate_medgemma_reports failed: {gen_error}")
+                    traceback.print_exc()
+                    return (
+                        f"❌ **Error:** Failed to generate MedGemma reports.\n\n**Details:** {str(gen_error)}",
+                        "*Report generation failed.*", "*Report generation failed.*", 
+                        None, None
+                    )
+                
+                print(f"[AUTO-CHAIN DEBUG] Reports returned - clinical: {clinical_report is not None}, patient: {patient_report is not None}")
+                
+                if clinical_report is None or patient_report is None:
+                    return (
+                        "❌ **Error:** Failed to generate MedGemma reports. Check console for details.",
+                        "*Report generation failed.*", "*Report generation failed.*", 
+                        None, None
+                    )
+                
+                # Ensure reports are strings
+                clinical_report_str = str(clinical_report) if clinical_report else "*No clinical report generated.*"
+                patient_report_str = str(patient_report) if patient_report else "*No patient report generated.*"
+                
+                print(f"[AUTO-CHAIN DEBUG] Clinical report length: {len(clinical_report_str)}")
+                print(f"[AUTO-CHAIN DEBUG] Patient report length: {len(patient_report_str)}")
+                
+                # Update JSON files with both reports
+                json_status = ""
+                try:
+                    if update_patient_results_json_with_medgemma(patient_id, session_id_selected, clinical_report_str, patient_report_str):
+                        json_status += "✅ Updated patient_results.json\n"
+                    if update_comman_format_json_with_medgemma(patient_id, clinical_report_str, patient_report_str):
+                        json_status += "✅ Updated comman_format.json\n"
+                except Exception as json_error:
+                    print(f"[AUTO-CHAIN WARNING] JSON update failed: {json_error}")
+                    json_status += "⚠️ Warning: Failed to update JSON files\n"
+                
+                status_msg = f"✅ **MedGemma reports generated automatically!**\n\n"
+                status_msg += f"- **Patient:** {patient_id}\n"
+                status_msg += f"- **Session:** {session_id_selected}\n"
+                
+                if clinical_docx_path and os.path.exists(clinical_docx_path):
+                    status_msg += f"- **Clinical Report:** `{clinical_docx_path}`\n"
+                if patient_docx_path and os.path.exists(patient_docx_path):
+                    status_msg += f"- **Patient Report:** `{patient_docx_path}`\n"
+                
+                status_msg += f"\n**Records:** {json_status}"
+                
+                # Copy files to Gradio temp directory for reliable downloads
+                clinical_file_result = copy_file_for_gradio_download(clinical_docx_path)
+                patient_file_result = copy_file_for_gradio_download(patient_docx_path)
+
+                print(f"[AUTO-CHAIN DEBUG] Returning final results...")
+                print(f"[AUTO-CHAIN DEBUG] clinical_file_result: {clinical_file_result}")
+                print(f"[AUTO-CHAIN DEBUG] patient_file_result: {patient_file_result}")
+                return (status_msg, clinical_report_str, patient_report_str, clinical_file_result, patient_file_result)
+                
+            except Exception as e:
+                print(f"[AUTO-CHAIN CRITICAL ERROR] Unexpected exception in auto_generate_medgemma_reports: {e}")
+                traceback.print_exc()
+                return (
+                    f"❌ **Critical Error:** {str(e)}", 
+                    "*Error occurred.*", "*Error occurred.*", 
+                    None, None
+                )
+        
+        # Auto-trigger analysis chain after tracking completes
+        # (defined here because handle_generate_medgemma_reports must be defined first)
+        tracking_event.then(
+            fn=handle_convert_to_nifti,
+            inputs=[session_id, selected_patient_info, ann_obj_id],
+            outputs=[output_nifti_file, nifti_status, output_report_file]
+        ).then(
+            fn=auto_generate_medgemma_reports,
+            inputs=[selected_patient_info],
+            outputs=[medgemma_status, clinical_report_display, patient_report_display, clinical_docx_file, patient_docx_file]
+        ).then(
+            fn=lambda: gr.Tabs.update(selected=2),
+            inputs=[],
+            outputs=[main_tabs]
+        )
+
+        # Wired manually for testing the generator fix
+        generate_reports_btn.click(
+            fn=auto_generate_medgemma_reports,
+            inputs=[selected_patient_info],
+            outputs=[medgemma_status, clinical_report_display, patient_report_display, clinical_docx_file, patient_docx_file]
+        )
+        
     app.queue(concurrency_count=1)
-    app.launch(debug=True, enable_queue=True, share=False, server_name="0.0.0.0", server_port=18862)
+    app.launch(debug=True, enable_queue=True, share=False, server_name="0.0.0.0", server_port=18862,
+               allowed_paths=[COMMON_DATA_PATH, GRADIO_TEMP_DIR])
     # app.launch(debug=True, enable_queue=True, share=True)
 
 if __name__ == "__main__":
