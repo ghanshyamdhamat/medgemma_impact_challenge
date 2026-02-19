@@ -906,115 +906,66 @@ def sam_stroke(session_id, seg_tracker, drawing_board, last_draw, frame_num, ann
     print(f"[DEBUG] sam_stroke: frame_num={frame_num}, loading image from {image_path}")
     image = cv2.imread(image_path)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    
-    # Handle ImageEditor input (dict with background, layers, composite)
+    display_image = image.copy()
+    input_mask = np.zeros(display_image.shape[:2], dtype=np.uint8)
+
+    # Handle both old sketch payload ({"image", "mask"}) and
+    # Gradio 6 editor payload ({"background", "layers", "composite"}).
     if isinstance(drawing_board, dict):
-        display_image = drawing_board.get("background")
-        # For mask, use the first layer (assuming single drawing layer) or composite
-        # If layers exist, use the last one (most recent drawing usually on top)
-        layers = drawing_board.get("layers", [])
-        if layers and len(layers) > 0:
-            input_mask = layers[-1]
-            # Ensure mask is single channel or handled correctly
-            if len(input_mask.shape) == 3 and input_mask.shape[2] == 4:
-                 # Extract alpha channel or use any channel if drawn with solid color
-                 # Usually drawing is opaque color on transparent background
-                 input_mask = input_mask[:, :, 3] # Use alpha channel as mask
-        elif drawing_board.get("composite") is not None:
-             # Fallback to composite if no layers (though less reliable if background included)
-             # But composite includes background image usually.
-             # Better to rely on layers for stroke.
-             # If no layers, maybe no drawing.
-             input_mask = np.zeros(display_image.shape[:2], dtype=np.uint8)
+        if drawing_board.get("image") is not None:
+            display_image = drawing_board.get("image")
+        elif drawing_board.get("background") is not None:
+            display_image = drawing_board.get("background")
+
+        if drawing_board.get("mask") is not None:
+            input_mask = drawing_board.get("mask")
         else:
-             input_mask = np.zeros(display_image.shape[:2], dtype=np.uint8)
-    else:
-        # Fallback for old style (if somehow passed)
+            layers = drawing_board.get("layers", [])
+            if layers and len(layers) > 0:
+                input_mask = layers[-1]
+            elif drawing_board.get("composite") is not None and drawing_board.get("background") is not None:
+                composite = drawing_board.get("composite")
+                background = drawing_board.get("background")
+                if composite is not None and background is not None and composite.shape[:2] == background.shape[:2]:
+                    comp_gray = cv2.cvtColor(composite, cv2.COLOR_RGB2GRAY) if composite.ndim == 3 else composite
+                    bg_gray = cv2.cvtColor(background, cv2.COLOR_RGB2GRAY) if background.ndim == 3 else background
+                    input_mask = cv2.absdiff(comp_gray, bg_gray)
+    elif drawing_board is not None:
         display_image = drawing_board
-        input_mask = np.zeros(display_image.shape[:2], dtype=np.uint8)
 
     image_predictor.set_image(image)
-    
-    # Clean mask
-    # Ensure input_mask is 2D
+
+    # Ensure mask is 2D uint8
     if len(input_mask.shape) == 3:
-        input_mask = input_mask[:, :, 0]
-        
+        if input_mask.shape[2] == 4:
+            input_mask = input_mask[:, :, 3]
+        else:
+            input_mask = input_mask[:, :, 0]
+
+    input_mask = input_mask.astype(np.uint8)
     input_mask[input_mask != 0] = 255
-    
-    # Handle last_draw logic if needed for cumulative drawing
-    # With ImageEditor, layers accumulate strokes. 
-    # If we want only the *new* stroke, we might need diff.
-    # But usually SAM point/box prompt uses the box from simple blob analysis.
-    # The existing logic did diff_mask = absdiff(input_mask, last_draw).
-    # If ImageEditor returns full layer history, then input_mask is the full current drawing.
-    # So diff against last_draw (which was previous full drawing) gives the new stroke.
-    
+
     if last_draw is not None:
-        # Resize last_draw to match current if needed (though should be same size)
         if last_draw.shape != input_mask.shape:
              last_draw = cv2.resize(last_draw, (input_mask.shape[1], input_mask.shape[0]), interpolation=cv2.INTER_NEAREST)
-        
         diff_mask = cv2.absdiff(input_mask, last_draw)
-        # Use diff_mask for box generation to capture only latest stroke intent
-        # BUT original code replaced input_mask with diff_mask.
-        # Let's keep that logic.
         working_mask = diff_mask
     else:
         working_mask = input_mask
-        
+
     bbox, hasMask = mask2bbox(working_mask) 
-    
-    if not hasMask :
-        # If no new stroke detected, maybe return existing state
-        display_image = draw_rect(display_image, bbox, ann_obj_id)
-        
-        # For Gradio 6.x ImageEditor, return dict format
-        drawing_board_val = {
-            "background": display_image,
-            "layers": [],
-            "composite": None
-        }
-        return seg_tracker, display_image, drawing_board_val, last_draw # Update last_draw to current
-        
+
+    if not hasMask:
+        return seg_tracker, display_image, display_image, last_draw
+
     masks, scores, logits = image_predictor.predict( point_coords=None, point_labels=None, box=bbox[None, :], multimask_output=False,)
     mask = masks > 0.0
     masked_frame = show_mask(mask, display_image, ann_obj_id)
     masked_with_rect = draw_rect(masked_frame, bbox, ann_obj_id)
     frame_idx, object_ids, masks = predictor.add_new_mask(inference_state, frame_idx=frame_num, obj_id=ann_obj_id, mask=mask[0])
-    
-    last_draw = input_mask # Update last_draw to current full mask state
-    
-    # Return:
-    # 1. seg_tracker
-    # 2. display_image (for drawing board background - usually same as input)
-    # 3. display_image (for input_first_frame? check caller usage)
-    # 4. last_draw
-    
-    # Caller expects: input_first_frame, drawing_board, last_draw
-    # We should return ImageEditor friendly dict for drawing_board if we want to update it?
-    # Or just the image? Gradio ImageEditor can accept just image as background.
-    # The original code returned `display_image` for both `input_first_frame` and `drawing_board`.
-    # Let's verify `sam_stroke` caller usage in `process_video`.
-    # It returns `input_first_frame`, `drawing_board`, `last_draw`.
-    # And `process_video` puts them in result queue.
-    # And UI `seg_acc_stroke.click` updates `input_first_frame`, `drawing_board`, `last_draw`.
-    # So `drawing_board` update should be compatible with `ImageEditor`.
-    # Passing an image to `ImageEditor` sets it as background and clears layers (usually).
-    # If we want to keep the drawing, we might need to return a dict.
-    # But `sam_stroke` usually *consumes* the stroke to create a segmentation, 
-    # and then displays the result (segmentation overlay) on `input_first_frame`.
-    # `drawing_board` is usually reset or updated with the result image?
-    # Original: `masked_with_rect` is returned for `drawing_board`.
-    # So the *result* (image with box) is shown on drawing board for next interaction?
-    # For Gradio 6.x ImageEditor, return dict format
-    drawing_board_val = {
-        "background": masked_with_rect,
-        "layers": [],
-        "composite": None
-    }
-    
-    return seg_tracker, masked_with_rect, drawing_board_val, last_draw
+
+    last_draw = input_mask
+    return seg_tracker, masked_with_rect, masked_with_rect, last_draw
 
 def draw_rect(image, bbox, obj_id):
     cmap = plt.get_cmap("tab10")
@@ -1981,9 +1932,9 @@ def seg_track_app():
         return session_id
 
     def make_editor_value(image):
-        """Return a stable Gradio ImageEditor image value."""
+        """Return a stable drawing-canvas image value."""
         if image is None:
-            image = np.zeros((512, 512, 3), dtype=np.uint8)
+            image = np.zeros((512, 512, 4), dtype=np.uint8)
         return image
 
     def handle_extract_video_info(session_id, input_video, skip_flag, current_slider_state):
@@ -2122,8 +2073,6 @@ def seg_track_app():
             frame_display_text += " | **Slice ID:** N/A (no annotation found)"
             print(f"[DEBUG] handle_get_meta_from_video: No target_slice found, showing N/A")
         
-        # Format for Gradio 6.x ImageEditor - use EditorValue dict format
-        # The ImageEditor expects: {"background": image, "layers": [], "composite": None}
         if drawing_board_img is not None:
             print(f"[DEBUG] handle_get_meta_from_video: drawing_board_img type={type(drawing_board_img)}, shape={drawing_board_img.shape if hasattr(drawing_board_img, 'shape') else 'N/A'}")
             drawing_board = drawing_board_img
@@ -2554,6 +2503,10 @@ def seg_track_app():
         max-width: 100%;
         height: auto;
     }
+    #stroke_drawing_board {
+        min-height: 550px;
+        border: 1px solid #666;
+    }
     """
 
     if platform.system() == "Windows":
@@ -2633,7 +2586,7 @@ def seg_track_app():
         gr.Markdown(
             '''
             <div style="text-align:center; margin-bottom:20px;">
-                <span style="font-size:3em; font-weight:bold;">MedSAM2: Segment Anything in 3D Medical Images and Videos</span>
+                <span style="font-size:3em; font-weight:bold;">GEMMA3S: Spot, Segment, Simplify</span>
             </div>
             '''
         )
@@ -2809,13 +2762,17 @@ def seg_track_app():
 
                         with gr.Tabs():
                             with gr.Tab(label="Stroke to Box Prompt") as tab_stroke:
-                                drawing_board = gr.ImageEditor(
+                                drawing_board = gr.ImageMask(
                                     label='Drawing Board',
                                     brush=gr.Brush(default_size=10),
                                     interactive=True,
                                     type="numpy",
                                     height=550,
-                                    value=np.zeros((512, 512, 3), dtype=np.uint8)
+                                    image_mode="RGBA",
+                                    value=np.zeros((512, 512, 4), dtype=np.uint8),
+                                    fixed_canvas=True,
+                                    canvas_size=(512, 512),
+                                    elem_id="stroke_drawing_board"
                                 )
                                 with gr.Row():
                                     seg_acc_stroke = gr.Button(value="Segment", interactive=True)
@@ -3616,7 +3573,8 @@ def seg_track_app():
         )
         
     app.queue(default_concurrency_limit=1)
-    app.launch(debug=True, share=False, server_name="0.0.0.0", server_port=18863,
+    server_port = int(os.getenv("GRADIO_SERVER_PORT", "18863"))
+    app.launch(debug=True, share=False, server_name="0.0.0.0", server_port=server_port,
                allowed_paths=[COMMON_DATA_PATH, GRADIO_TEMP_DIR], css=css)
     # app.launch(debug=True, enable_queue=True, share=True)
 
