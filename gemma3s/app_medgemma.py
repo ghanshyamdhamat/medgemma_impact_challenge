@@ -607,12 +607,12 @@ def create_patient_table_html(patient_data):
             table-layout: fixed;
         }
         .patient-table thead {
-            background-color: #4CAF50;
+            background-color: #000000;
             color: white;
         }
         .patient-table th {
             padding: 8px;
-            text-align: left;
+            text-align: center;
             font-weight: bold;
             border: 1px solid #ddd;
             font-size: 0.9em;
@@ -620,31 +620,43 @@ def create_patient_table_html(patient_data):
         .patient-table td {
             padding: 6px 8px;
             border: 1px solid #ddd;
-            color: #ffffff;
+            color: #000000;
             font-size: 0.85em;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            text-align: center;
         }
-        .patient-table tbody tr.reviewed-row {
-            background-color: #1b5e20;
+        /* Tumor Present + Not Reviewed -> Red (Darker) */
+        .patient-table tbody tr.row-tumor-unreviewed {
+            background-color: #e57373; 
         }
-        .patient-table tbody tr.not-reviewed-row {
-            background-color: #b71c1c;
+        /* Tumor Present + Reviewed -> Yellow (Darker) */
+        .patient-table tbody tr.row-tumor-reviewed {
+            background-color: #fff176;
         }
-        .patient-table tbody tr.reviewed-row:hover {
-            background-color: #2e7d32;
+        /* Normal / No Tumor -> Green (Darker) */
+        .patient-table tbody tr.row-normal {
+            background-color: #81c784;
         }
-        .patient-table tbody tr.not-reviewed-row:hover {
-            background-color: #c62828;
+
+        .patient-table tbody tr.row-tumor-unreviewed:hover {
+            background-color: #ef5350;
         }
+        .patient-table tbody tr.row-tumor-reviewed:hover {
+            background-color: #ffee58;
+        }
+        .patient-table tbody tr.row-normal:hover {
+            background-color: #66bb6a;
+        }
+
         .patient-table th:nth-child(1),
         .patient-table td:nth-child(1) {
             width: 4%;
         }
         .patient-table th:nth-child(2),
         .patient-table td:nth-child(2) {
-            width: 10%;
+            width: 13%;
         }
         .patient-table th:nth-child(3),
         .patient-table td:nth-child(3) {
@@ -667,24 +679,25 @@ def create_patient_table_html(patient_data):
             width: 15%;
         }
         .tumor-yes {
-            color: #ff6b6b;
+            color: #000000;
             font-weight: bold;
         }
         .tumor-no {
-            color: #51cf66;
+            color: #000000;
             font-weight: bold;
         }
         .reviewed-yes {
-            color: #a5d6a7;
+            color: #000000;
         }
         .reviewed-no {
-            color: #ef9a9a;
+            color: #000000;
         }
         .conf-score {
             font-weight: bold;
+            color: #000000;
         }
         .row-number {
-            color: #e0e0e0;
+            color: #000000;
             font-size: 0.85em;
         }
     </style>
@@ -704,16 +717,25 @@ def create_patient_table_html(patient_data):
     """
     
     for idx, patient in enumerate(patient_data):
-        tumor_class = "tumor-yes" if patient['tumor'] else "tumor-no"
-        tumor_text = "Tumor Present" if patient['tumor'] else "Normal"
+        has_tumor = patient.get('tumor', False)
+        is_reviewed = patient.get('reviewed_by_radio', False)
+
+        tumor_class = "tumor-yes" if has_tumor else "tumor-no"
+        tumor_text = "Tumor Present" if has_tumor else "Normal"
         
-        reviewed_class = "reviewed-yes" if patient['reviewed_by_radio'] else "reviewed-no"
-        reviewed_text = "Yes" if patient['reviewed_by_radio'] else "No"
+        reviewed_class = "reviewed-yes" if is_reviewed else "reviewed-no"
+        reviewed_text = "Yes" if is_reviewed else "No"
         
-        # Add row class based on reviewed status
-        row_class = "reviewed-row" if patient['reviewed_by_radio'] else "not-reviewed-row"
+        # Determine row class based on requirements
+        if has_tumor:
+            if is_reviewed:
+                row_class = "row-tumor-reviewed" # Red -> Yellow
+            else:
+                row_class = "row-tumor-unreviewed" # Red
+        else:
+            row_class = "row-normal" # Green/Default matching "lighter" theme
         
-        conf_score = patient['conf_score']
+        conf_score = patient.get('conf_score', 0.0)
         
         html += f"""
             <tr class="{row_class}">
@@ -722,14 +744,50 @@ def create_patient_table_html(patient_data):
                 <td class="{tumor_class}">{tumor_text}</td>
                 <td class="conf-score">{conf_score:.2f}</td>
                 <td class="{reviewed_class}">{reviewed_text}</td>
-                <td title="{patient['remark']}">{patient['remark']}</td>
-                <td title="{patient['modalities']}">{patient['modalities']}</td>
+                <td title="{patient.get('remark', '')}">{patient.get('remark', '')}</td>
+                <td title="{patient.get('modalities', '')}">{patient.get('modalities', '')}</td>
             </tr>
         """
     
     html += """
         </tbody>
     </table>
+    
+    <style>
+        .legend-container {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            font-family: Arial, sans-serif;
+            font-size: 0.9em;
+            color: #333;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
+    </style>
+    <div class="legend-container">
+        <div class="legend-item">
+            <span class="legend-color" style="background-color: #e57373;"></span>
+            <span>Tumor Present (Not Reviewed)</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background-color: #fff176;"></span>
+            <span>Tumor Present (Reviewed)</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background-color: #81c784;"></span>
+            <span>Normal / No Tumor</span>
+        </div>
+    </div>
     """
     
     return html
@@ -2048,8 +2106,8 @@ def seg_track_app():
             return "*No patient selected.*", "*No report available.*", "*No report available.*"
         
         nifti_status_text = ""
-        clinical_report_text = "*No report available yet.*"
-        patient_report_text = "*No report available yet.*"
+        clinical_report_text = "⏳ *Waiting for reports to populate in JSON...*"
+        patient_report_text = "⏳ *Waiting for reports to populate in JSON...*"
         
         # 1. Try to read from patient_results.json (session-specific, most detailed)
         try:
@@ -2344,6 +2402,11 @@ def seg_track_app():
         selected_patient_info = gr.State(value={})
         skip_video_change = gr.State(value=False)
         
+        # Dummy state components for capturing unused outputs
+        dummy_nifti_file = gr.State()
+        dummy_nifti_status = gr.State() 
+        dummy_report_file = gr.State()
+        
         app.load(extract_session_id_from_request, None, session_id)
         
         gr.Markdown(
@@ -2604,21 +2667,7 @@ def seg_track_app():
                 """)
                 
                 with gr.Row():
-                    # ---- Left Column: Quantitative Analysis ----
-                    with gr.Column(scale=1):
-                        gr.Markdown("### 📊 Quantitative Analysis")
-                        gr.Markdown("Convert segmentation masks to NIfTI format and calculate volume statistics.")
-                        convert_to_nifti_btn = gr.Button("🔄 Convert & Calculate", variant="primary")
-                        
-                        gr.Markdown("---")
-                        gr.Markdown("#### Analysis Report")
-                        nifti_status = gr.Markdown("*No analysis run yet. Click the button above after completing segmentation.*")
-                        
-                        with gr.Row():
-                            output_nifti_file = gr.File(label="Segmentation NIfTI", interactive=False, file_count="single")
-                            output_report_file = gr.File(label="Volume Report", interactive=False, file_count="single")
-
-                    # ---- Right Column: Qualitative Analysis (MedGemma) ----
+                    # ---- Qualitative Analysis (MedGemma) - Full Width ----
                     with gr.Column(scale=1):
                         gr.Markdown("### 🧠 Qualitative Analysis (MedGemma)")
                         gr.Markdown("Generate AI-powered clinical and patient-friendly reports.")
@@ -2882,7 +2931,9 @@ def seg_track_app():
         )
         
         # Connect the dropdown change event to the full automation pipeline
-        patient_selection_dropdown.change(
+        # Connect the "Load & Go" button to the full automation pipeline
+        # (Previously this was on dropdown change, but user requested manual trigger)
+        go_to_segmentation_btn.click(
             fn=auto_load_patient_pipeline,
             inputs=[patient_selection_dropdown, patient_data_state, scale_slider, session_id],
             outputs=[
@@ -2895,7 +2946,7 @@ def seg_track_app():
         ).then(
             fn=load_existing_reports,
             inputs=[selected_patient_info],
-            outputs=[nifti_status, clinical_report_display, patient_report_display]
+            outputs=[dummy_nifti_status, clinical_report_display, patient_report_display]
         )
         
         # Legacy/Other connections
@@ -3137,11 +3188,12 @@ def seg_track_app():
                 )
 
         # Button to convert segmentation masks back to NIfTI
-        convert_to_nifti_btn.click(
-            fn=handle_convert_to_nifti,
-            inputs=[session_id, selected_patient_info, ann_obj_id],
-            outputs=[output_nifti_file, nifti_status, output_report_file]
-        )
+        # convert_to_nifti_btn removed from UI
+        # convert_to_nifti_btn.click(
+        #     fn=handle_convert_to_nifti,
+        #     inputs=[session_id, selected_patient_info, ann_obj_id],
+        #     outputs=[output_nifti_file, nifti_status, output_report_file]
+        # )
         
 
 
@@ -3242,14 +3294,26 @@ def seg_track_app():
                 
                 status_msg += f"\n**Records:** {json_status}"
                 
-                # Copy files to Gradio temp directory for reliable downloads
-                clinical_file_result = copy_file_for_gradio_download(clinical_docx_path)
-                patient_file_result = copy_file_for_gradio_download(patient_docx_path)
+                # Ensure paths are strings or None, not other types
+                clinical_path_ret = str(clinical_docx_path) if clinical_docx_path else None
+                patient_path_ret = str(patient_docx_path) if patient_docx_path else None
+                
+                # Check file existence one last time
+                if clinical_path_ret and not os.path.exists(clinical_path_ret):
+                    print(f"[AUTO-CHAIN WARNING] Clinical report file missing at return: {clinical_path_ret}")
+                    clinical_path_ret = None
+                if patient_path_ret and not os.path.exists(patient_path_ret):
+                    print(f"[AUTO-CHAIN WARNING] Patient report file missing at return: {patient_path_ret}")
+                    patient_path_ret = None
 
-                print(f"[AUTO-CHAIN DEBUG] Returning final results...")
-                print(f"[AUTO-CHAIN DEBUG] clinical_file_result: {clinical_file_result}")
-                print(f"[AUTO-CHAIN DEBUG] patient_file_result: {patient_file_result}")
-                return (status_msg, clinical_report_str, patient_report_str, clinical_file_result, patient_file_result)
+                print(f"[AUTO-CHAIN DEBUG] Final Return Values:")
+                print(f"  status_msg: {type(status_msg)}")
+                print(f"  clinical_report_str: {type(clinical_report_str)}")
+                print(f"  patient_report_str: {type(patient_report_str)}")
+                print(f"  clinical_path_ret: {clinical_path_ret} ({type(clinical_path_ret)})")
+                print(f"  patient_path_ret: {patient_path_ret} ({type(patient_path_ret)})")
+                
+                return (status_msg, clinical_report_str, patient_report_str, clinical_path_ret, patient_path_ret)
                 
             except Exception as e:
                 print(f"[AUTO-CHAIN CRITICAL ERROR] Unexpected exception in auto_generate_medgemma_reports: {e}")
@@ -3265,7 +3329,7 @@ def seg_track_app():
         tracking_event.then(
             fn=handle_convert_to_nifti,
             inputs=[session_id, selected_patient_info, ann_obj_id],
-            outputs=[output_nifti_file, nifti_status, output_report_file]
+            outputs=[dummy_nifti_file, dummy_nifti_status, dummy_report_file]
         ).then(
             fn=auto_generate_medgemma_reports,
             inputs=[selected_patient_info],
