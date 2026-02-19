@@ -34,6 +34,7 @@ import cv2
 import nibabel as nib
 from omegaconf import OmegaConf
 from simplify_report import MedGemmaSimplify
+import sys
 
 # Register custom resolvers to avoid omegaconf errors with certain configs
 for resolver_name, resolver_func in [
@@ -470,8 +471,8 @@ def nifti_to_video(patient_id, session_id, scan_name):
     # We'll stick to per-slice normalization as in load_nifti_slice for robustness.
     for i in range(total_slices):
         slice_data = data[:, :, i]
-        # Rotate 90 degrees counterclockwise for proper display orientation
-        slice_data = np.rot90(slice_data, k=1)
+        # No rotation needed - keep original orientation to avoid shape mismatch
+        # slice_data = np.rot90(slice_data, k=1)
         slice_min = np.percentile(slice_data, 2)
         slice_max = np.percentile(slice_data, 98)
         slice_data = np.clip(slice_data, slice_min, slice_max)
@@ -604,110 +605,6 @@ def create_patient_table_html(patient_data):
         return "<p>No patient data available.</p>"
     
     html = """
-    <style>
-        .patient-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-family: Arial, sans-serif;
-            margin: 20px 0;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            table-layout: fixed;
-        }
-        .patient-table thead {
-            background-color: #000000;
-            color: white;
-        }
-        .patient-table th {
-            padding: 8px;
-            text-align: center;
-            font-weight: bold;
-            border: 1px solid #ddd;
-            font-size: 0.9em;
-        }
-        .patient-table td {
-            padding: 6px 8px;
-            border: 1px solid #ddd;
-            color: #000000;
-            font-size: 0.85em;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            text-align: center;
-        }
-        /* Tumor Present + Not Reviewed -> Red (Darker) */
-        .patient-table tbody tr.row-tumor-unreviewed {
-            background-color: #e57373; 
-        }
-        /* Tumor Present + Reviewed -> Yellow (Darker) */
-        .patient-table tbody tr.row-tumor-reviewed {
-            background-color: #fff176;
-        }
-        /* Normal / No Tumor -> Green (Darker) */
-        .patient-table tbody tr.row-normal {
-            background-color: #81c784;
-        }
-
-        .patient-table tbody tr.row-tumor-unreviewed:hover {
-            background-color: #ef5350;
-        }
-        .patient-table tbody tr.row-tumor-reviewed:hover {
-            background-color: #ffee58;
-        }
-        .patient-table tbody tr.row-normal:hover {
-            background-color: #66bb6a;
-        }
-
-        .patient-table th:nth-child(1),
-        .patient-table td:nth-child(1) {
-            width: 4%;
-        }
-        .patient-table th:nth-child(2),
-        .patient-table td:nth-child(2) {
-            width: 13%;
-        }
-        .patient-table th:nth-child(3),
-        .patient-table td:nth-child(3) {
-            width: 13%;
-        }
-        .patient-table th:nth-child(4),
-        .patient-table td:nth-child(4) {
-            width: 9%;
-        }
-        .patient-table th:nth-child(5),
-        .patient-table td:nth-child(5) {
-            width: 9%;
-        }
-        .patient-table th:nth-child(6),
-        .patient-table td:nth-child(6) {
-            width: 40%;
-        }
-        .patient-table th:nth-child(7),
-        .patient-table td:nth-child(7) {
-            width: 15%;
-        }
-        .tumor-yes {
-            color: #000000;
-            font-weight: bold;
-        }
-        .tumor-no {
-            color: #000000;
-            font-weight: bold;
-        }
-        .reviewed-yes {
-            color: #000000;
-        }
-        .reviewed-no {
-            color: #000000;
-        }
-        .conf-score {
-            font-weight: bold;
-            color: #000000;
-        }
-        .row-number {
-            color: #000000;
-            font-size: 0.85em;
-        }
-    </style>
     <table class="patient-table">
         <thead>
             <tr>
@@ -760,27 +657,6 @@ def create_patient_table_html(patient_data):
         </tbody>
     </table>
     
-    <style>
-        .legend-container {
-            display: flex;
-            gap: 20px;
-            margin-top: 10px;
-            font-family: Arial, sans-serif;
-            font-size: 0.9em;
-            color: #333;
-        }
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .legend-color {
-            width: 16px;
-            height: 16px;
-            border-radius: 4px;
-            border: 1px solid #ccc;
-        }
-    </style>
     <div class="legend-container">
         <div class="legend-item">
             <span class="legend-color" style="background-color: #e57373;"></span>
@@ -1188,18 +1064,17 @@ def convert_masks_to_nifti(session_id, original_nifti_path, obj_id=0, patient_id
             continue
         
         # Resize mask to match original slice dimensions if needed
-        # Note: The displayed slices were rotated 90 degrees CCW, so dimensions are swapped
-        target_shape = (original_data.shape[0], original_data.shape[1])  # After rotation back
+        target_shape = (original_data.shape[0], original_data.shape[1])
         if mask.shape != target_shape:
+            # Standard resize without axis swap
             mask = cv2.resize(mask, (target_shape[1], target_shape[0]), 
                             interpolation=cv2.INTER_NEAREST)
         
         # Binarize mask (threshold at 127)
         mask_binary = (mask > 127).astype(np.uint8)
         
-        # Rotate mask back (90 degrees clockwise = k=-1) to match original NIfTI orientation
-        # This reverses the counterclockwise rotation applied during display
-        mask_binary = np.rot90(mask_binary, k=-1)
+        # No rotation back needed as we removed forward rotation
+        # mask_binary = np.rot90(mask_binary, k=-1)
         
         # Place mask in the corresponding slice
         if frame_idx < segmentation_volume.shape[2]:
@@ -1333,6 +1208,19 @@ def run_parcellation_analysis(patient_id, session_id_selected, segmentation_path
         
         print(f"[INFO] Parcellation result: {parcellation_result}")
         
+        # Parse volume from parcellation result
+        volume_ml = None
+        if parcellation_result:
+            try:
+                import re
+                # Look for pattern "X ml tumor extending"
+                match = re.search(r'(\d+)\s*ml tumor extending', parcellation_result)
+                if match:
+                    volume_ml = int(match.group(1))
+                    print(f"[INFO] Parsed tumor volume: {volume_ml} ml")
+            except Exception as e:
+                print(f"[WARNING] Failed to parse volume from parcellation result: {e}")
+        
         # Save parcellation output to patient folder
         parcellation_output_path = None
         if parcellation_result:
@@ -1351,15 +1239,15 @@ def run_parcellation_analysis(patient_id, session_id_selected, segmentation_path
                 f.write(result.stdout)
             print(f"[INFO] Saved parcellation output to: {parcellation_output_path}")
         
-        return parcellation_result, parcellation_output_path
+        return parcellation_result, parcellation_output_path, volume_ml
         
     except Exception as e:
         print(f"[ERROR] Failed to run parcellation: {e}")
         import traceback
         traceback.print_exc()
-        return None, None
+        return None, None, None
 
-def update_patient_results_json(patient_id, session_id_selected, parcellation_result, segmentation_path, parcellation_path):
+def update_patient_results_json(patient_id, session_id_selected, parcellation_result, segmentation_path, parcellation_path, volume_ml=None):
     """Update patient's patient_results.json file with session-specific parcellation data.
     
     Args:
@@ -1394,6 +1282,10 @@ def update_patient_results_json(patient_id, session_id_selected, parcellation_re
         patient_data[session_key]["manual report from SAM"] = parcellation_result
         patient_data[session_key]["SAM segmentation file path"] = segmentation_path
         patient_data[session_key]["parcellation file path"] = parcellation_path if parcellation_path else "N/A"
+        if volume_ml is not None:
+            patient_data[session_key]["tumor_volume_ml"] = volume_ml
+        if volume_ml is not None:
+            patient_data[session_key]["tumor_volume_ml"] = volume_ml
         
         # Save updated data
         with open(patient_results_file, 'w') as f:
@@ -2243,8 +2135,8 @@ def seg_track_app():
         output_video = result.get("output_video")
         output_mp4 = result.get("output_mp4")
         output_mask = result.get("output_mask")
-        click_stack = result.get("click_stack")
-        return input_first_frame, drawing_board, output_video, output_mp4, output_mask, click_stack
+        # click_stack removed from return to match Gradio output count (5)
+        return input_first_frame, drawing_board, output_video, output_mp4, output_mask
     
     def load_existing_reports(patient_info):
         """Load existing analysis reports from patient_results.json and comman_format.json.
@@ -2405,7 +2297,7 @@ def seg_track_app():
                 if patient_seg_path and os.path.exists(patient_seg_path):
                     status_msg += "---\n\n"
                     status_msg += "🔄 **Running parcellation analysis...**\n\n"
-                    parcellation_result, parcellation_path = run_parcellation_analysis(patient_id, session_id_selected, patient_seg_path)
+                    parcellation_result, parcellation_path, volume_ml = run_parcellation_analysis(patient_id, session_id_selected, patient_seg_path)
                     
                     if parcellation_result:
                         status_msg += f"## Parcellation Analysis Results\n\n"
@@ -2422,7 +2314,7 @@ def seg_track_app():
                                 status_msg += f"⚠️ Could not read parcellation report from `{parcellation_path}`\n\n"
                         
                         # Update patient_results.json (session-specific)
-                        if update_patient_results_json(patient_id, session_id_selected, parcellation_result, patient_seg_path, parcellation_path):
+                        if update_patient_results_json(patient_id, session_id_selected, parcellation_result, patient_seg_path, parcellation_path, volume_ml):
                             status_msg += "✅ **Updated patient_results.json**\n"
                         else:
                             status_msg += "⚠️ **Warning: Failed to update patient_results.json**\n"
@@ -2497,6 +2389,196 @@ def seg_track_app():
     ##########################################################
     ######################  Front-end ########################
     ##########################################################
+    def get_next_patient_id():
+        """Get the next available patient ID (pid_XXX)."""
+        patients = get_patient_list()
+        if not patients:
+            return "pid_001"
+        
+        max_id = 0
+        for p in patients:
+            try:
+                curr_id = int(p.split('_')[1])
+                if curr_id > max_id:
+                    max_id = curr_id
+            except (IndexError, ValueError):
+                continue
+        
+        return f"pid_{max_id + 1:03d}"
+
+    def get_next_session_id(patient_id):
+        """Get the next available session ID (sess_XX) for a patient."""
+        sessions = get_patient_sessions(patient_id)
+        if not sessions:
+            return "sess_01"
+        
+        max_id = 0
+        for s in sessions:
+            try:
+                curr_id = int(s.split('_')[1])
+                if curr_id > max_id:
+                    max_id = curr_id
+            except (IndexError, ValueError):
+                continue
+        
+        return f"sess_{max_id + 1:02d}"
+
+    def run_pipeline_for_patient(patient_id):
+        """Run the analysis pipeline for a specific patient."""
+        import subprocess
+        
+        # Path to pipeline.py
+        # app is in gemma3s/, pipeline is in gemma3s/
+        pipeline_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pipeline.py")
+        
+        cmd = [sys.executable, pipeline_script, "--pid", patient_id]
+        print(f"[INFO] Triggering pipeline: {' '.join(cmd)}")
+        
+        try:
+            # Run in background or wait?
+            # User wants to know when it's done typically.
+            # Using partial output capture to debug if needed
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            
+            if result.returncode == 0:
+                print(f"[INFO] Pipeline finished successfully for {patient_id}")
+                return True, "Analysis pipeline complete."
+            else:
+                print(f"[ERROR] Pipeline failed with code {result.returncode}")
+                print(f"[ERROR] stderr: {result.stderr}")
+                return False, f"Pipeline Error: {result.stderr}"
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to run pipeline: {e}")
+            return False, f"Pipeline Exception: {str(e)}"
+
+    def handle_scan_upload(patient_mode, new_pid_val, existing_pid_val, uploaded_files):
+        """Handle MRI scan upload, folder creation, and pipeline trigger."""
+        if not uploaded_files:
+            return "❌ Error: No file uploaded.", gr.update(), gr.update()
+        
+        # Determine patient ID
+        if patient_mode == "New Patient":
+            patient_id = new_pid_val
+            is_new_patient = True
+        else:
+            patient_id = existing_pid_val
+            is_new_patient = False
+            
+        if not patient_id:
+            return "❌ Error: No patient ID selected.", gr.update(), gr.update()
+
+        try:
+            # 1. Create Directories
+            patient_dir = os.path.join(COMMON_DATA_PATH, patient_id)
+            if is_new_patient:
+                if os.path.exists(patient_dir):
+                     return f"❌ Error: Patient {patient_id} already exists. Please refresh.", gr.update(), gr.update()
+                os.makedirs(patient_dir)
+                # Create json folder for annotations (even if empty initially)
+                os.makedirs(os.path.join(patient_dir, "json"), exist_ok=True)
+                
+            session_id = get_next_session_id(patient_id)
+            session_dir = os.path.join(patient_dir, "mri_scans", session_id)
+            os.makedirs(session_dir, exist_ok=True)
+            
+            # 2. Save Files
+            saved_files = []
+            
+            # Ensure input is a list
+            file_list = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
+            
+            for file_obj in file_list:
+                # Get original filename but ensure it's safe
+                orig_name = os.path.basename(file_obj.name)
+                
+                # Should be NIfTI
+                if not (orig_name.endswith('.nii') or orig_name.endswith('.nii.gz')):
+                     print(f"[WARNING] Skipping non-nifti file: {orig_name}")
+                     continue
+                     
+                dest_path = os.path.join(session_dir, orig_name)
+                shutil.copy2(file_obj.name, dest_path)
+                print(f"[INFO] Saved scan to {dest_path}")
+                saved_files.append(orig_name)
+            
+            if not saved_files:
+                return "❌ Error: No valid NIfTI files saved.", gr.update(), gr.update()
+            
+            # 3. Update JSONs
+            # comman_format.json
+            common_format_path = os.path.join(COMMON_DATA_PATH, "comman_format.json")
+            if os.path.exists(common_format_path):
+                with open(common_format_path, 'r') as f:
+                    common_data = json.load(f)
+            else:
+                common_data = []
+            
+            # Check if entry exists
+            patient_entry = next((item for item in common_data if item["pid"] == patient_id), None)
+            
+            if not patient_entry:
+                # Create new entry
+                new_entry = {
+                    "pid": patient_id,
+                    "tumor": None, # "Keep tumor key as None"
+                    "reviewed_by_radio": False,
+                    "gemma_hard_coded_remark": None,
+                    # Add timestamp
+                    "created_timestamp": str(datetime.datetime.now())
+                }
+                common_data.append(new_entry)
+            else:
+                 pass
+                 
+            with open(common_format_path, 'w') as f:
+                json.dump(common_data, f, indent=4)
+                
+            # patient_results.json
+            results_path = os.path.join(patient_dir, "patient_results.json")
+            if os.path.exists(results_path):
+                with open(results_path, 'r') as f:
+                    results_data = json.load(f)
+            else:
+                results_data = {}
+                
+            # Add session entry
+            # Collect modalities
+            mods = []
+            for fname in saved_files:
+                lower = fname.lower()
+                if "flair" in lower: mods.append("flair")
+                elif "t1" in lower: mods.append("t1")
+                elif "t2" in lower: mods.append("t2")
+                else: mods.append("unknown")
+                
+            results_data[session_id] = {
+                # Initialize with empty/default
+                "mod": mods,
+                "gemma_hard_coded_remark": "Pending Analysis"
+            }
+            
+            with open(results_path, 'w') as f:
+                json.dump(results_data, f, indent=4)
+                
+            # 4. Trigger Analysis
+            status_msg = f"✅ Upload successful!\n- Patient: {patient_id}\n- Session: {session_id}\n- Files: {', '.join(saved_files)}\n\nRunning analysis pipeline..."
+            # yield status_msg, gr.update(), gr.update()
+            
+            success, pipe_msg = run_pipeline_for_patient(patient_id)
+            
+            final_status = f"{status_msg}\n\n{pipe_msg}"
+            
+            # Refresh patient list for dropdown
+            return final_status, gr.update(value=get_next_patient_id()), gr.update(choices=get_patient_list())
+            
+        except Exception as e:
+            print(f"[ERROR] Upload handler failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"❌ System Error: {str(e)}", gr.update(), gr.update()
+
+
     css = """
     #input_output_video video {
         max-height: 550px;
@@ -2548,6 +2630,7 @@ def seg_track_app():
     config_file_map = dict(zip(config_display, config_files))
     checkpoint_file_map = dict(zip(checkpoint_display, checkpoint_files))
 
+
     # CSS for patient selection page
     css = css + """
     .patient-card {
@@ -2564,6 +2647,131 @@ def seg_track_app():
     }
     .scan-button {
         margin: 5px;
+    }
+
+    /* Patient Table CSS moved from create_patient_table_html */
+    .patient-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: Arial, sans-serif;
+        margin: 20px 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        table-layout: fixed;
+    }
+    .patient-table thead {
+        background-color: #000000;
+        color: white;
+    }
+    .patient-table th {
+        padding: 8px;
+        text-align: center;
+        font-weight: bold;
+        border: 1px solid #ddd;
+        font-size: 0.9em;
+    }
+    .patient-table td {
+        padding: 6px 8px;
+        border: 1px solid #ddd;
+        color: #000000;
+        font-size: 0.85em;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        text-align: center;
+    }
+    /* Tumor Present + Not Reviewed -> Red (Darker) */
+    .patient-table tbody tr.row-tumor-unreviewed {
+        background-color: #e57373; 
+    }
+    /* Tumor Present + Reviewed -> Yellow (Darker) */
+    .patient-table tbody tr.row-tumor-reviewed {
+        background-color: #fff176;
+    }
+    /* Normal / No Tumor -> Green (Darker) */
+    .patient-table tbody tr.row-normal {
+        background-color: #81c784;
+    }
+
+    .patient-table tbody tr.row-tumor-unreviewed:hover {
+        background-color: #ef5350;
+    }
+    .patient-table tbody tr.row-tumor-reviewed:hover {
+        background-color: #ffee58;
+    }
+    .patient-table tbody tr.row-normal:hover {
+        background-color: #66bb6a;
+    }
+
+    .patient-table th:nth-child(1),
+    .patient-table td:nth-child(1) {
+        width: 4%;
+    }
+    .patient-table th:nth-child(2),
+    .patient-table td:nth-child(2) {
+        width: 13%;
+    }
+    .patient-table th:nth-child(3),
+    .patient-table td:nth-child(3) {
+        width: 13%;
+    }
+    .patient-table th:nth-child(4),
+    .patient-table td:nth-child(4) {
+        width: 9%;
+    }
+    .patient-table th:nth-child(5),
+    .patient-table td:nth-child(5) {
+        width: 9%;
+    }
+    .patient-table th:nth-child(6),
+    .patient-table td:nth-child(6) {
+        width: 40%;
+    }
+    .patient-table th:nth-child(7),
+    .patient-table td:nth-child(7) {
+        width: 15%;
+    }
+    .tumor-yes {
+        color: #000000;
+        font-weight: bold;
+    }
+    .tumor-no {
+        color: #000000;
+        font-weight: bold;
+    }
+    .reviewed-yes {
+        color: #000000;
+    }
+    .reviewed-no {
+        color: #000000;
+    }
+    .conf-score {
+        font-weight: bold;
+        color: #000000;
+    }
+    .row-number {
+        color: #000000;
+        font-size: 0.85em;
+    }
+
+    /* Legend CSS */
+    .legend-container {
+        display: flex;
+        gap: 20px;
+        margin-top: 10px;
+        font-family: Arial, sans-serif;
+        font-size: 0.9em;
+        color: #333;
+    }
+    .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .legend-color {
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        border: 1px solid #ccc;
     }
     """
 
@@ -2586,13 +2794,57 @@ def seg_track_app():
         gr.Markdown(
             '''
             <div style="text-align:center; margin-bottom:20px;">
-                <span style="font-size:3em; font-weight:bold;">GEMMA3S: Spot, Segment, Simplify</span>
+                <span style="font-size:3em; font-weight:bold;">GEMMA3S: Spot, Segment & Simplify</span>
             </div>
             '''
         )
         
         # Main tabs for navigation
         with gr.Tabs() as main_tabs:
+            # ==================== UPLOAD SCANS TAB ====================
+            with gr.Tab("📤 Upload Scans", id=99) as upload_tab:
+                gr.Markdown("""
+                ### 📤 Upload MRI Scans
+                Add scans for a new patient or append a new session to an existing patient.
+                The analysis pipeline will run automatically upon upload.
+                """)
+                
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        patient_mode = gr.Radio(
+                            choices=["New Patient", "Existing Patient"],
+                            value="New Patient",
+                            label="Patient Type",
+                            interactive=True
+                        )
+                        
+                        # Components for New Patient
+                        new_patient_id = gr.Textbox(
+                            label="New Patient ID (Auto-generated)",
+                            value=get_next_patient_id(),
+                            interactive=False,
+                            visible=True
+                        )
+                        
+                        # Components for Existing Patient
+                        existing_patient_dropdown = gr.Dropdown(
+                            label="Select Existing Patient",
+                            choices=[],
+                            interactive=True,
+                            visible=False
+                        )
+                        
+                    with gr.Column(scale=1):
+                        mri_file_upload = gr.File(
+                            label="Upload MRI Scan (NIfTI)", 
+                            file_count="multiple",
+                            interactive=True
+                        )
+                        
+                        upload_btn = gr.Button("🚀 Upload & Analyze", variant="primary")
+                
+                upload_status = gr.Textbox(label="Status & Pipeline Logs", lines=10, interactive=False)
+                
             # ==================== PATIENT SELECTION TAB ====================
             with gr.Tab("📋 Patient Overview", id=0) as patient_tab:
                 gr.Markdown("""
@@ -2883,10 +3135,70 @@ def seg_track_app():
                         with gr.Row():
                             clinical_docx_file = gr.File(label="Clinical DOCX", interactive=False, file_count="single")
                             patient_docx_file = gr.File(label="Patient DOCX", interactive=False, file_count="single")
+                    
+                    # ---- Quantitative Analysis (Trend Plot) ----
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 📈 Quantitative Analysis (Volume Tracking)")
+                        gr.Markdown("Trend of tumor volume across sessions.")
+                        
+                        volume_plot = gr.LinePlot(
+                            x="Session", 
+                            y="Volume (mL)", 
+                            title="Tumor Volume Trend",
+                            tooltip=["Session", "Volume (mL)"]
+                        )
+                        
+                        refresh_plot_btn = gr.Button("🔄 Refresh Plot")
 
         ##########################################################
         ######################  back-end #########################
         ##########################################################
+
+        def plot_volume_trend(patient_info):
+            """Generate a line plot of tumor volume over sessions."""
+            if not (patient_info and isinstance(patient_info, dict)):
+                return None
+            
+            patient_id = patient_info.get("patient_id")
+            if not patient_id:
+                return None
+
+            try:
+                patient_folder = join(COMMON_DATA_PATH, patient_id)
+                results_file = join(patient_folder, "patient_results.json")
+                
+                if not exists(results_file):
+                    return None
+                    
+                with open(results_file, 'r') as f:
+                    data = json.load(f)
+                    
+                sessions = []
+                volumes = []
+                
+                # Extract sessions with volume data
+                for session_key, session_data in data.items():
+                    vol = session_data.get("tumor_volume_ml")
+                    if vol is not None:
+                        sessions.append(session_key)
+                        volumes.append(vol)
+                
+                if not sessions:
+                    return None
+                    
+                # Sort sessions
+                sorted_indices = sorted(range(len(sessions)), key=lambda k: sessions[k])
+                sessions = [sessions[i] for i in sorted_indices]
+                volumes = [volumes[i] for i in sorted_indices]
+                
+                import pandas as pd
+                df = pd.DataFrame({"Session": sessions, "Volume (mL)": volumes})
+                
+                return gr.LinePlot.update(value=df, title=f"Tumor Volume Trend ({patient_id})", visible=True)
+
+            except Exception as e:
+                print(f"[ERROR] Failed to plot volume trend: {e}")
+                return None
 
         # Patient selection handlers
         def load_patient_summary_table():
@@ -2982,6 +3294,36 @@ def seg_track_app():
             # Return: navigate to segmentation tab (tab 1), update scan info, store patient info
             return gr.Tabs(selected=1), info_text, patient_info
         
+
+        
+        # Upload Tab Logic
+        def toggle_patient_mode(mode):
+            if mode == "New Patient":
+                # Get next ID dynamically
+                next_id = get_next_patient_id()
+                return gr.update(visible=True, value=next_id), gr.update(visible=False)
+            else:
+                # Refresh patient list
+                patients = get_patient_list()
+                return gr.update(visible=False), gr.update(visible=True, choices=patients)
+
+        patient_mode.change(
+            fn=toggle_patient_mode,
+            inputs=[patient_mode],
+            outputs=[new_patient_id, existing_patient_dropdown]
+        )
+        
+        upload_btn.click(
+            fn=handle_scan_upload,
+            inputs=[patient_mode, new_patient_id, existing_patient_dropdown, mri_file_upload],
+            outputs=[upload_status, new_patient_id, existing_patient_dropdown]
+        ).then(
+            # Refresh patient overview table after upload
+            fn=load_patient_summary_table,
+            inputs=[],
+            outputs=[patient_summary_table, patient_data_state, patient_selection_dropdown]
+        )
+
         def on_patient_select(patient_id):
             """When a patient is selected, load their sessions."""
             if not patient_id:
@@ -3156,6 +3498,13 @@ def seg_track_app():
             fn=navigate_to_patients,
             inputs=[],
             outputs=[main_tabs, patient_selection_dropdown]
+        )
+        
+        # Reload patient summary table when the tab is selected
+        patient_tab.select(
+            fn=load_patient_summary_table,
+            inputs=[],
+            outputs=[patient_summary_table, patient_data_state, patient_selection_dropdown]
         )
         
         # Load patient summary table on app start
@@ -3570,6 +3919,19 @@ def seg_track_app():
             fn=render_report_textboxes,
             inputs=[clinical_report_state, patient_report_state],
             outputs=[clinical_report_display, patient_report_display]
+        )
+        
+        # Volume Plot Event Listeners
+        analysis_tab.select(
+            fn=plot_volume_trend,
+            inputs=[selected_patient_info],
+            outputs=[volume_plot]
+        )
+        
+        refresh_plot_btn.click(
+            fn=plot_volume_trend,
+            inputs=[selected_patient_info],
+            outputs=[volume_plot]
         )
         
     app.queue(default_concurrency_limit=1)
