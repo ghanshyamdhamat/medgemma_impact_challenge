@@ -237,7 +237,7 @@ def find_flair_scan(patient_id, session_id):
     
     # Look for files containing 'flair' (case-insensitive)
     for scan in scans:
-        if 'flair' in scan.lower():
+        if 'flair' in scan.lower() or 't2f' in scan.lower():
             return scan
     
     # If no FLAIR found, return None
@@ -573,7 +573,7 @@ def sort_patient_data(patient_data):
     """Sort patient data according to specified rules:
     1. Not reviewed by radiologist come first
     2. Reviewed by radiologist come second
-    3. Within reviewed: tumor patients before normal patients
+    3. Within each group: tumor patients before healthy/normal patients
     
     Args:
         patient_data: List of patient dictionaries
@@ -584,11 +584,11 @@ def sort_patient_data(patient_data):
     def sort_key(patient):
         reviewed = patient.get('reviewed_by_radio', False)
         has_tumor = patient.get('tumor', False)
-        
-        # Create sort tuple: (reviewed, not has_tumor)
-        # This will put not reviewed first (False < True)
-        # Within reviewed, tumor (False for not has_tumor) before normal (True for not has_tumor)
-        return (reviewed, not has_tumor if reviewed else False)
+
+        # Sort tuple:
+        # - reviewed: False (not reviewed) first, True (reviewed) second
+        # - not has_tumor: False (tumor) before True (healthy)
+        return (reviewed, not has_tumor)
     
     return sorted(patient_data, key=sort_key)
 
@@ -631,13 +631,14 @@ def create_patient_table_html(patient_data):
         reviewed_text = "Yes" if is_reviewed else "No"
         
         # Determine row class based on requirements
-        if has_tumor:
-            if is_reviewed:
-                row_class = "row-tumor-reviewed" # Red -> Yellow
-            else:
-                row_class = "row-tumor-unreviewed" # Red
+        if has_tumor and not is_reviewed:
+            row_class = "row-tumor-unreviewed"
+        elif (not has_tumor) and (not is_reviewed):
+            row_class = "row-healthy-unreviewed"
+        elif has_tumor and is_reviewed:
+            row_class = "row-tumor-reviewed"
         else:
-            row_class = "row-normal" # Green/Default matching "lighter" theme
+            row_class = "row-healthy-reviewed"
         
         conf_score = patient.get('conf_score', 0.0)
         
@@ -660,15 +661,19 @@ def create_patient_table_html(patient_data):
     <div class="legend-container">
         <div class="legend-item">
             <span class="legend-color" style="background-color: #e57373;"></span>
-            <span>Tumor Present (Not Reviewed)</span>
+            <span>Tumor (Not Reviewed)</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background-color: #ffb74d;"></span>
+            <span>Healthy (Not Reviewed)</span>
         </div>
         <div class="legend-item">
             <span class="legend-color" style="background-color: #fff176;"></span>
-            <span>Tumor Present (Reviewed)</span>
+            <span>Tumor (Reviewed)</span>
         </div>
         <div class="legend-item">
             <span class="legend-color" style="background-color: #81c784;"></span>
-            <span>Normal / No Tumor</span>
+            <span>Healthy (Reviewed)</span>
         </div>
     </div>
     """
@@ -1213,10 +1218,10 @@ def run_parcellation_analysis(patient_id, session_id_selected, segmentation_path
         if parcellation_result:
             try:
                 import re
-                # Look for pattern "X ml tumor extending"
-                match = re.search(r'(\d+)\s*ml tumor extending', parcellation_result)
+                # Look for pattern like "X ml tumor extending" (supports int/float)
+                match = re.search(r'(\d+(?:\.\d+)?)\s*ml tumor extending', parcellation_result, re.IGNORECASE)
                 if match:
-                    volume_ml = int(match.group(1))
+                    volume_ml = float(match.group(1))
                     print(f"[INFO] Parsed tumor volume: {volume_ml} ml")
             except Exception as e:
                 print(f"[WARNING] Failed to parse volume from parcellation result: {e}")
@@ -1272,20 +1277,19 @@ def update_patient_results_json(patient_id, session_id_selected, parcellation_re
                 patient_data = json.load(f)
         else:
             patient_data = {}
-        
+            
         # Update session data
         session_key = session_id_selected.replace('_', '_')  # Keep original format
         if session_key not in patient_data:
             patient_data[session_key] = {}
-        
+            
         # Update with parcellation results
         patient_data[session_key]["manual report from SAM"] = parcellation_result
         patient_data[session_key]["SAM segmentation file path"] = segmentation_path
         patient_data[session_key]["parcellation file path"] = parcellation_path if parcellation_path else "N/A"
-        if volume_ml is not None:
-            patient_data[session_key]["tumor_volume_ml"] = volume_ml
-        if volume_ml is not None:
-            patient_data[session_key]["tumor_volume_ml"] = volume_ml
+
+        # Always keep key present for plotting
+        patient_data[session_key]["tumor_volume_ml"] = float(volume_ml) if volume_ml is not None else None
         
         # Save updated data
         with open(patient_results_file, 'w') as f:
@@ -2008,7 +2012,7 @@ def seg_track_app():
         last_draw = result.get("last_draw")
         return input_first_frame, drawing_board, last_draw
 
-    def handle_sam_click(session_id, frame_num, point_mode, click_stack, ann_obj_id, frame_per_val, slider_state, evt: gr.SelectData):
+    def handle_sam_click(session_id, frame_num, point_mode, click_stack, ann_obj_id, frame_per_val, slider_state, current_image, evt: gr.SelectData):
         print(f"[DEBUG] handle_sam_click: frame_num={frame_num}, frame_per_val={frame_per_val}, slider_state={slider_state}")
         
         # ROBUST FIX: If frame_num is 0 but slider is not at start, recalculate frame_num from slider
@@ -2029,9 +2033,46 @@ def seg_track_app():
         # clean_up_processes(session_id)
         queue = start_process(session_id)
         result_queue = user_processes[session_id]["result_queue"]
-        # Gradio 6.x select event returns (x, y) coordinates in image pixel space
         print(f"[DEBUG] handle_sam_click: evt.index={evt.index}, evt.value={getattr(evt, 'value', None)}")
-        point = np.array([[evt.index[0], evt.index[1]]], dtype=np.float32)
+        idx0, idx1 = int(evt.index[0]), int(evt.index[1])
+        x, y = idx0, idx1
+
+        evt_val = getattr(evt, "value", None)
+        if isinstance(current_image, np.ndarray) and current_image.ndim >= 2 and evt_val is not None:
+            img_h, img_w = current_image.shape[:2]
+
+            def pixel_distance(px, val):
+                try:
+                    px_arr = np.asarray(px, dtype=np.float32).flatten()
+                    val_arr = np.asarray(val, dtype=np.float32).flatten()
+                    n = min(px_arr.size, val_arr.size)
+                    if n == 0:
+                        return float("inf")
+                    return float(np.mean(np.abs(px_arr[:n] - val_arr[:n])))
+                except Exception:
+                    return float("inf")
+
+            cand_xy_ok = 0 <= idx0 < img_w and 0 <= idx1 < img_h
+            cand_yx_ok = 0 <= idx1 < img_w and 0 <= idx0 < img_h
+
+            if cand_xy_ok and cand_yx_ok:
+                px_xy = current_image[idx1, idx0]
+                px_yx = current_image[idx0, idx1]
+                d_xy = pixel_distance(px_xy, evt_val)
+                d_yx = pixel_distance(px_yx, evt_val)
+                if d_yx < d_xy:
+                    x, y = idx1, idx0
+            elif cand_yx_ok and not cand_xy_ok:
+                x, y = idx1, idx0
+
+        image_path = f'/tmp/output_frames/{session_id}/{frame_num:07d}.jpg'
+        frame_img = cv2.imread(image_path)
+        if frame_img is not None:
+            frame_h, frame_w = frame_img.shape[:2]
+            x = int(np.clip(x, 0, frame_w - 1))
+            y = int(np.clip(y, 0, frame_h - 1))
+
+        point = np.array([[x, y]], dtype=np.float32)
         print(f"[DEBUG] handle_sam_click: point={point}")
         queue.put({"command": "sam_click", "frame_num": frame_num, "point_mode": point_mode, "click_stack": click_stack, "ann_obj_id": ann_obj_id, "point": point})
         result = result_queue.get()
@@ -2051,7 +2092,9 @@ def seg_track_app():
         result = result_queue.get()
         ann_obj_id = result.get("ann_obj_id")
         max_obj_id = result.get("max_obj_id")
-        obj_id_slider = gr.Slider(maximum=max_obj_id, value=ann_obj_id)
+        obj_id_slider = gr.Slider(
+                            maximum=max_obj_id, 
+                            value=ann_obj_id)
         return ann_obj_id, max_obj_id, obj_id_slider
 
     def handle_update_current_id(session_id, ann_obj_id):
@@ -2260,22 +2303,32 @@ def seg_track_app():
             
             if result.get("success"):
                 output_nifti_path = result.get("output_nifti_path")
-                volume_ml = result.get("volume_ml")
+                segmentation_volume_ml = result.get("volume_ml")
                 voxel_count = result.get("voxel_count")
                 report_path = result.get("report_path")
                 patient_seg_path = result.get("patient_seg_path")
+
+                if patient_seg_path and os.path.exists(patient_seg_path):
+                    early_report = "Segmentation completed; parcellation pending"
+                    update_patient_results_json(
+                        patient_id=patient_id,
+                        session_id_selected=session_id_selected,
+                        parcellation_result=early_report,
+                        segmentation_path=patient_seg_path,
+                        parcellation_path=None,
+                        volume_ml=float(segmentation_volume_ml) if segmentation_volume_ml is not None else None
+                    )
                 
                 # Build the comprehensive report
                 status_msg = f"# Segmentation and Volume Analysis Report\n\n"
                 status_msg += f"## Patient Information\n"
-                status_msg += f"- **Patient ID:** {patient_id}\n"
-                status_msg += f"- **Session ID:** {session_id_selected}\n"
+                status_msg += f"- **Patient ID:** {patient_id} | **Session:** {session_id_selected}\n"
                 status_msg += f"- **Scan:** {scan_name}\n\n"
                 
                 status_msg += f"## Segmentation Results\n"
                 status_msg += f"- **Object ID:** {ann_obj_id}\n"
                 status_msg += f"- **Segmented Voxels:** {voxel_count:,}\n"
-                status_msg += f"- **Total Volume:** {volume_ml:.2f} mL\n\n"
+                status_msg += f"- **Total Volume:** {segmentation_volume_ml:.2f} mL\n\n"
                 
                 # Read and display volume report
                 if report_path and os.path.exists(report_path):
@@ -2297,11 +2350,16 @@ def seg_track_app():
                 if patient_seg_path and os.path.exists(patient_seg_path):
                     status_msg += "---\n\n"
                     status_msg += "🔄 **Running parcellation analysis...**\n\n"
-                    parcellation_result, parcellation_path, volume_ml = run_parcellation_analysis(patient_id, session_id_selected, patient_seg_path)
-                    
+                    parcellation_result, parcellation_path, parcellation_volume_ml = run_parcellation_analysis(patient_id, session_id_selected, patient_seg_path)
+                    final_volume_ml = parcellation_volume_ml if parcellation_volume_ml is not None else segmentation_volume_ml
+
                     if parcellation_result:
                         status_msg += f"## Parcellation Analysis Results\n\n"
                         status_msg += f"**Summary:** {parcellation_result}\n\n"
+
+                        update_patient_results_json(
+                        patient_id, session_id_selected, parcellation_result, patient_seg_path, parcellation_path, final_volume_ml
+                    )
                         
                         # Read and display parcellation report
                         if parcellation_path and os.path.exists(parcellation_path):
@@ -2314,7 +2372,7 @@ def seg_track_app():
                                 status_msg += f"⚠️ Could not read parcellation report from `{parcellation_path}`\n\n"
                         
                         # Update patient_results.json (session-specific)
-                        if update_patient_results_json(patient_id, session_id_selected, parcellation_result, patient_seg_path, parcellation_path, volume_ml):
+                        if update_patient_results_json(patient_id, session_id_selected, parcellation_result, patient_seg_path, parcellation_path, final_volume_ml):
                             status_msg += "✅ **Updated patient_results.json**\n"
                         else:
                             status_msg += "⚠️ **Warning: Failed to update patient_results.json**\n"
@@ -2330,6 +2388,12 @@ def seg_track_app():
                     else:
                         status_msg += "## Parcellation Analysis\n\n"
                         status_msg += "⚠️ **Warning: Parcellation analysis failed**\n"
+                        fallback_report = "Parcellation analysis failed"
+                    #     update_patient_results_json(
+                    #     patient_id, session_id_selected, "Parcellation analysis failed", patient_seg_path, None, segmentation_volume_ml
+                    # )
+                        if update_patient_results_json(patient_id, session_id_selected, fallback_report, patient_seg_path, None, segmentation_volume_ml):
+                            status_msg += "✅ **Saved segmentation volume to patient_results.json**\n"
                 
                 return output_nifti_path, status_msg, report_path
             else:
@@ -2585,10 +2649,6 @@ def seg_track_app():
         max-width: 100%;
         height: auto;
     }
-    #stroke_drawing_board {
-        min-height: 550px;
-        border: 1px solid #666;
-    }
     """
 
     if platform.system() == "Windows":
@@ -2683,22 +2743,29 @@ def seg_track_app():
     .patient-table tbody tr.row-tumor-unreviewed {
         background-color: #e57373; 
     }
-    /* Tumor Present + Reviewed -> Yellow (Darker) */
+    /* Healthy + Not Reviewed -> Orange */
+    .patient-table tbody tr.row-healthy-unreviewed {
+        background-color: #ffb74d;
+    }
+    /* Tumor Present + Reviewed -> Yellow */
     .patient-table tbody tr.row-tumor-reviewed {
         background-color: #fff176;
     }
-    /* Normal / No Tumor -> Green (Darker) */
-    .patient-table tbody tr.row-normal {
+    /* Healthy + Reviewed -> Green */
+    .patient-table tbody tr.row-healthy-reviewed {
         background-color: #81c784;
     }
 
     .patient-table tbody tr.row-tumor-unreviewed:hover {
         background-color: #ef5350;
     }
+    .patient-table tbody tr.row-healthy-unreviewed:hover {
+        background-color: #ffa726;
+    }
     .patient-table tbody tr.row-tumor-reviewed:hover {
         background-color: #ffee58;
     }
-    .patient-table tbody tr.row-normal:hover {
+    .patient-table tbody tr.row-healthy-reviewed:hover {
         background-color: #66bb6a;
     }
 
@@ -2950,19 +3017,17 @@ def seg_track_app():
                         </a>
                     </div>
                     <div style="text-align:left; margin-bottom:20px;">
-                        This API supports using box (generated by scribble) and point prompts for medical image and video segmentation.
+                        This API supports using point prompts for medical image and video segmentation.
                     </div>
                     <div style="margin-bottom:20px;">
                         <ol style="list-style:none; padding-left:0;">
                             <li>1. Upload video file or load NIfTI scan from patient data</li>
                             <li>2. Select model size, downsample frame rate and run <b>Preprocess</b> (for video) or <b>Load NIfTI Slice</b> (for medical images)</li>
-                            <li>3. Use <b>Stroke to Box Prompt</b> to draw box on the image or <b>Point Prompt</b> to click on the image.</li>
-                            <li>&nbsp;&nbsp;&nbsp;Note: The bounding rectangle of the stroke should be able to cover the segmentation target.</li>
-                            <li>4. Click <b>Segment</b> to get the segmentation result</li>
-                            <li>5. Click <b>Add New Object</b> to add new object</li>
-                            <li>6. Click <b>Start Tracking</b> to track objects (for video)</li>
-                            <li>7. Click <b>Reset</b> to reset the app</li>
-                            <li>8. Download the results</li>
+                            <li>3. Use <b>Point Prompt</b> to click on the image to mark regions of interest</li>
+                            <li>4. Click <b>Add New Object</b> to add new object</li>
+                            <li>5. Click <b>Start Tracking</b> to track objects (for video)</li>
+                            <li>6. Click <b>Reset</b> to reset the app</li>
+                            <li>7. Download the results</li>
                         </ol>
                     </div>
                     <div style="text-align:left; line-height:1.8;">
@@ -3012,31 +3077,17 @@ def seg_track_app():
                         
                         # use_nifti_button removed completely
 
-                        with gr.Tabs():
-                            with gr.Tab(label="Stroke to Box Prompt") as tab_stroke:
-                                drawing_board = gr.ImageMask(
-                                    label='Drawing Board',
-                                    brush=gr.Brush(default_size=10),
-                                    interactive=True,
-                                    type="numpy",
-                                    height=550,
-                                    image_mode="RGBA",
-                                    value=np.zeros((512, 512, 4), dtype=np.uint8),
-                                    fixed_canvas=True,
-                                    canvas_size=(512, 512),
-                                    elem_id="stroke_drawing_board"
-                                )
-                                with gr.Row():
-                                    seg_acc_stroke = gr.Button(value="Segment", interactive=True)
-                                    
-                            with gr.Tab(label="Point Prompt") as tab_click:
-                                input_first_frame = gr.Image(label='Segment result / Input image', interactive=True)
-                                with gr.Row():
-                                    point_mode = gr.Radio(
-                                                choices=["Positive",  "Negative"],
-                                                value="Positive",
-                                                label="Point Prompt",
-                                                interactive=True)
+                        # Hidden drawing_board state (used internally by various handlers)
+                        drawing_board = gr.State(value=np.zeros((512, 512, 4), dtype=np.uint8))
+                        
+                        # Point Prompt UI
+                        input_first_frame = gr.Image(label='Segment result / Input image', interactive=True)
+                        with gr.Row():
+                            point_mode = gr.Radio(
+                                        choices=["Positive",  "Negative"],
+                                        value="Positive",
+                                        label="Point Prompt",
+                                        interactive=True)
                                     
                         # Current frame/slice display
                         current_frame_display = gr.Markdown(
@@ -3194,7 +3245,7 @@ def seg_track_app():
                 import pandas as pd
                 df = pd.DataFrame({"Session": sessions, "Volume (mL)": volumes})
                 
-                return gr.LinePlot.update(value=df, title=f"Tumor Volume Trend ({patient_id})", visible=True)
+                return gr.update(value=df, visible=True)
 
             except Exception as e:
                 print(f"[ERROR] Failed to plot volume trend: {e}")
@@ -3500,14 +3551,7 @@ def seg_track_app():
             outputs=[main_tabs, patient_selection_dropdown]
         )
         
-        # Reload patient summary table when the tab is selected
-        patient_tab.select(
-            fn=load_patient_summary_table,
-            inputs=[],
-            outputs=[patient_summary_table, patient_data_state, patient_selection_dropdown]
-        )
-        
-        # Load patient summary table on app start
+        # Reload patient summary table on app start
         app.load(
             fn=load_patient_summary_table,
             inputs=[],
@@ -3528,7 +3572,7 @@ def seg_track_app():
         input_first_frame.select(
             fn=handle_sam_click,
             inputs=[
-                session_id, frame_num, point_mode, click_stack, ann_obj_id, frame_per, slider_state
+                session_id, frame_num, point_mode, click_stack, ann_obj_id, frame_per, slider_state, input_first_frame
             ],
             outputs=[
                 input_first_frame, drawing_board, click_stack
@@ -3572,17 +3616,7 @@ def seg_track_app():
             outputs={ann_obj_id}
         )
 
-        # Do not overwrite drawing_board on tab select; it is managed by meta/preprocess flow
-
-        seg_acc_stroke.click(
-            fn=handle_sam_stroke,
-            inputs=[
-                session_id, drawing_board, last_draw, frame_num, ann_obj_id, frame_per, slider_state
-            ],
-            outputs=[
-                input_first_frame, drawing_board, last_draw
-            ]
-        )
+        # Stroke to box prompt removed - using point prompt only
 
         input_video.change(
             fn=handle_extract_video_info,
