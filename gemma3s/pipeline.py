@@ -144,14 +144,22 @@ def predict_volume_tumor(model, processor, volume_path):
         with torch.no_grad():
             outputs = model(**inputs)
 
+        # logits = outputs.logits_per_image
+        # #take softmax
+        # probs = torch.nn.functional.softmax(logits, dim=-1)
+        # # confidence = (logits[0][0] - logits[0][1]).item()
+        # confidence = max(probs[0][0],probs[0][1])
+
+        # slice_results[z] = confidence
+        # predictions.append(1 if confidence == probs[0][0] else 0)
         logits = outputs.logits_per_image
-        #take softmax
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-        # confidence = (logits[0][0] - logits[0][1]).item()
-        confidence = max(probs[0][0],probs[0][1])
+        probs = torch.softmax(logits, dim=-1)   # shape [1, 2]
+
+        pred_idx = torch.argmax(probs, dim=-1).item()   # 0=tumor, 1=no tumor
+        confidence = probs[0, pred_idx].item()
 
         slice_results[z] = confidence
-        predictions.append(1 if confidence == probs[0][0] else 0)
+        predictions.append(1 if pred_idx == 0 else 0)
 
     return predictions, slice_results
 
@@ -268,7 +276,7 @@ def process_patient(patient_entry: dict, config_data: dict, config_path: str,
     
     # Locate FLAIR NIfTI
     # Path: common_data/pid_XXX/mri_scans/sess_XX/*flair*.nii*
-    flair_files = list((pid_dir / "mri_scans"/sess_id).rglob("*flair*.nii*"))
+    flair_files = list((pid_dir / "mri_scans"/sess_id).rglob("*flair*.nii*")) + list((pid_dir / "mri_scans"/sess_id).rglob("*t2f*.nii*"))
     if not flair_files:
         print(f"Error: No FLAIR file found for {pid} session {sess_id}")
         return None
