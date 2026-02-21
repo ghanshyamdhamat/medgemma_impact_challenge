@@ -16,3 +16,5 @@ checkpoints/*.pt
 *.json
 *.png
 *.jpeg
+*.docx
+*.txt

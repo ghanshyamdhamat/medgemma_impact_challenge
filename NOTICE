@@ -1,0 +1,41 @@
+GEMMA3S: Spot, Segment & Simplify
+Copyright 2026
+
+================================================================================
+
+This project contains code derived from and builds heavily upon:
+
+MedSAM2
+Copyright 2025 Bo Wang Lab, University of Toronto
+Licensed under the Apache License, Version 2.0
+Repository: https://github.com/bowang-lab/MedSAM2
+Paper: https://arxiv.org/abs/2504.03600
+
+The following components are adapted from MedSAM2:
+- Core SAM2 video segmentation framework (sam2/ directory)
+- Medical image predictor implementation
+- NIfTI integration and 3D reconstruction pipeline
+- Video-based segmentation workflow
+- Frame propagation algorithms
+
+================================================================================
+
+This project also incorporates or depends on the following open source projects:
+
+SAM2 (Segment Anything Model 2)
+Copyright Meta Platforms, Inc.
+Licensed under the Apache License, Version 2.0
+Repository: https://github.com/facebookresearch/sam2
+
+FreeSurfer Tools and Atlas
+Copyright Massachusetts General Hospital
+Repository: https://surfer.nmr.mgh.harvard.edu/
+
+Gradio
+Copyright Gradio Team
+Licensed under the Apache License, Version 2.0
+Repository: https://github.com/gradio-app/gradio
+
+================================================================================
+
+For complete license information, see the LICENSE file in this repository.

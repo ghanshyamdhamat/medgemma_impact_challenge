@@ -1,7 +1,18 @@
 """
+GEMMA3S: Spot, Segment & Simplify
 Gradio app for interactive medical video segmentation using MedSAM2.
-Supports Gradio 6.x (tested with 6.6.0).
-ImageEditor value format: {"background": numpy_array, "layers": [], "composite": None}
+
+This application builds heavily on the MedSAM2 codebase:
+- Repository: https://github.com/bowang-lab/MedSAM2
+- Paper: https://arxiv.org/abs/2504.03600
+- Credit: Bo Wang Lab, University of Toronto
+
+GEMMA3S extends MedSAM2 with AI-powered report generation, patient management,
+parcellation analysis, and enhanced UI for clinical workflows.
+
+Technical Details:
+- Supports Gradio 6.x (tested with 6.6.0)
+- ImageEditor value format: {"background": numpy_array, "layers": [], "composite": None}
 """
 
 import datetime
@@ -179,52 +190,6 @@ def get_latest_session_from_patient_results(patient_id):
         print(f"[ERROR] Error reading patient_results.json for {patient_id}: {e}")
         import traceback
         traceback.print_exc()
-        # Fallback to filesystem-based session detection
-        return get_most_recent_session(patient_id)
-
-def get_latest_session_from_patient_results(patient_id):
-    """Get the latest session from patient_results.json file.
-    
-    Args:
-        patient_id: Patient ID
-    
-    Returns:
-        str: Latest session ID or None if not found
-    """
-    try:
-        patient_folder = join(COMMON_DATA_PATH, patient_id)
-        patient_results_file = join(patient_folder, "patient_results.json")
-        
-        if not exists(patient_results_file):
-            print(f"[INFO] patient_results.json not found for {patient_id}, using filesystem sessions")
-            return get_most_recent_session(patient_id)
-        
-        import json
-        with open(patient_results_file, 'r') as f:
-            patient_data = json.load(f)
-        
-        if not patient_data:
-            print(f"[INFO] Empty patient_results.json for {patient_id}, using filesystem sessions")
-            return get_most_recent_session(patient_id)
-        
-        # Get all session keys and sort them to find the latest
-        session_keys = [key for key in patient_data.keys() if key.startswith('sess')]
-        if not session_keys:
-            print(f"[INFO] No sessions found in patient_results.json for {patient_id}")
-            return get_most_recent_session(patient_id)
-        
-        # Sort sessions (assuming format like sess_01, sess_02, etc.)
-        session_keys.sort()
-        latest_session = session_keys[-1]
-        
-        print(f"[INFO] Found latest session from patient_results.json: {latest_session}")
-        return latest_session
-        
-    except Exception as e:
-        print(f"[ERROR] Error reading patient_results.json for {patient_id}: {e}")
-        import traceback
-        traceback.print_exc()
-        # Fallback to filesystem-based session detection
         return get_most_recent_session(patient_id)
 
 def find_flair_scan(patient_id, session_id):
@@ -1600,19 +1565,8 @@ def tracking_objects(session_id, seg_tracker, frame_num, input_video):
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
-    # output_frames = int(total_frames * scale_slider)
     output_frames = len([name for name in os.listdir(output_combined_dir) if os.path.isfile(os.path.join(output_combined_dir, name)) and name.endswith('.png')])
     out_fps = fps * output_frames / total_frames
-
-    # ffmpeg.input(os.path.join(output_combined_dir, '%07d.png'), framerate=out_fps).output(output_video_path, vcodec='h264_nvenc', pix_fmt='yuv420p').run()
-
-    # fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    # out = cv2.VideoWriter(output_video_path, fourcc, out_fps, (frame_width, frame_height))
-    # for i in range(output_frames):
-    #     frame_path = os.path.join(output_combined_dir, f'{i:07d}.png')
-    #     frame = cv2.imread(frame_path)
-    #     out.write(frame)
-    # out.release()
 
     image_files = [os.path.join(output_combined_dir, f'{i:07d}.png') for i in range(output_frames)]
     clip = ImageSequenceClip(image_files, fps=out_fps)
@@ -1784,19 +1738,6 @@ def start_process(session_id):
         user_processes[session_id]["last_active"] = datetime.datetime.now()
     return user_processes[session_id]["queue"]
 
-# def clean_up_processes(session_id, init_clean = False):
-#     now = datetime.datetime.now()
-#     to_remove = []
-#     for s_id, process_info in user_processes.items():
-#         if (now - process_info["last_active"] > PROCESS_TIMEOUT) or (s_id == session_id and init_clean):
-#             process_info["queue"].put({"command": "exit"})
-#             process_info["process"].terminate()
-#             process_info["process"].join()
-#             to_remove.append(s_id)
-#     for s_id in to_remove:
-#         del user_processes[s_id]
-#         print(f"Cleaned up process for session {s_id}.")
-        
 def monitor_and_cleanup_processes():
     while True:
         now = datetime.datetime.now()
@@ -1817,13 +1758,8 @@ def seg_track_app():
     import gradio as gr
     
     def extract_session_id_from_request(request: gr.Request):
+        """Generate a unique session ID based on client connection."""
         session_id = hashlib.sha256(f'{request.client.host}:{request.client.port}'.encode('utf-8')).hexdigest()
-        # cookies = request.kwargs["headers"].get('cookie', '')
-        # session_id = None
-        # if '_gid=' in cookies:
-        #     session_id = cookies.split('_gid=')[1].split(';')[0]
-        # else:
-        #     session_id = str(uuid.uuid4())
         print(f"session_id {session_id}")
         return session_id
 
@@ -1834,13 +1770,11 @@ def seg_track_app():
         return image
 
     def handle_extract_video_info(session_id, input_video, skip_flag, current_slider_state):
-        # If the pipeline already preprocessed the video, skip this handler
-        # to avoid resetting the slider/frame back to 0
+        """Extract video metadata and prepare initial frame."""
         if skip_flag:
             print("[DEBUG] handle_extract_video_info: Skipping (pipeline already handled preprocessing)")
             return gr.skip(), gr.skip(), current_slider_state, gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), False
         
-        # clean_up_processes(session_id, init_clean=True)
         if input_video == None:
             return 0, 0, {
             "minimum": 0.0,
@@ -1877,7 +1811,7 @@ def seg_track_app():
         return scale_slider, frame_per, slider_state, gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), False
 
     def handle_get_meta_from_video(session_id, input_video, scale_slider, config_path, checkpoint_path, patient_info=None):
-        # Validate that a video is loaded
+        """Initialize SAM2 predictor and prepare video for annotation."""
         if input_video is None:
             print("[ERROR] handle_get_meta_from_video: No video loaded. Please click 'Use selected scan (NIfTI) as video' first.")
             # Return safe default values to prevent errors
@@ -1896,10 +1830,6 @@ def seg_track_app():
                 "⚠️ **Error:** No video loaded. Please click 'Use selected scan (NIfTI) as video' button first to load a scan."  # current_frame_display
             )
         
-        # Paths are now passed directly
-        # config_path = config_file_map[selected_config]
-        # checkpoint_path = checkpoint_file_map[selected_checkpoint]
-        
         print(f"[DEBUG] handle_get_meta_from_video: patient_info={patient_info}")
         print(f"[DEBUG] Using config: {config_path}")
         print(f"[DEBUG] Using checkpoint: {checkpoint_path}")
@@ -1914,7 +1844,6 @@ def seg_track_app():
                 target_slice = get_slice_id_for_patient_session(pid, sid)
                 print(f"[DEBUG] handle_get_meta_from_video: target_slice from JSON={target_slice}")
 
-        # clean_up_processes(session_id)
         queue = start_process(session_id)
         result_queue = user_processes[session_id]["result_queue"]
         queue.put({
@@ -2517,7 +2446,7 @@ def seg_track_app():
             return False, f"Pipeline Exception: {str(e)}"
 
     def handle_scan_upload(patient_mode, new_pid_val, existing_pid_val, uploaded_files):
-        """Handle MRI scan upload, folder creation, and pipeline trigger."""
+        """Handle MRI scan upload, create folder structure, and trigger automated analysis pipeline."""
         if not uploaded_files:
             return "❌ Error: No file uploaded.", gr.update(), gr.update()
         
@@ -2627,7 +2556,6 @@ def seg_track_app():
                 
             # 4. Trigger Analysis
             status_msg = f"✅ Upload successful!\n- Patient: {patient_id}\n- Session: {session_id}\n- Files: {', '.join(saved_files)}\n\nRunning analysis pipeline..."
-            # yield status_msg, gr.update(), gr.update()
             
             success, pipe_msg = run_pipeline_for_patient(patient_id)
             
@@ -2862,6 +2790,8 @@ def seg_track_app():
             '''
             <div style="text-align:center; margin-bottom:20px;">
                 <span style="font-size:3em; font-weight:bold;">GEMMA3S: Spot, Segment & Simplify</span>
+                <br>
+                <span style="font-size:0.9em; color:#666;">Powered by <a href="https://github.com/bowang-lab/MedSAM2" target="_blank">MedSAM2</a> • Bo Wang Lab, University of Toronto</span>
             </div>
             '''
         )
