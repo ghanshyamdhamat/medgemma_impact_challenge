@@ -208,6 +208,29 @@ def find_flair_scan(patient_id, session_id):
     # If no FLAIR found, return None
     return None
 
+def find_t1ce_scan(patient_id, session_id):
+    """Find the T1CE (T1 contrast-enhanced) scan in a given session.
+    
+    Returns:
+        str: Name of the T1CE file, or None if not found
+    """
+    scans = get_session_scans(patient_id, session_id)
+    
+    # Look for files containing 't1ce' or 't1c' (case-insensitive)
+    # Common naming patterns: t1ce, t1c, T1CE, T1C, t1_ce, t1-ce, etc.
+    for scan in scans:
+        scan_lower = scan.lower()
+        if 't1ce' in scan_lower or 't1c' in scan_lower or 't1-ce' in scan_lower or 't1_ce' in scan_lower:
+            # Avoid matching t1 scans that are not contrast-enhanced
+            if 't1' in scan_lower and 'ce' in scan_lower:
+                return scan
+            # Also match standalone t1ce/t1c patterns
+            if 't1ce' in scan_lower or 't1c' in scan_lower.replace('-', '').replace('_', ''):
+                return scan
+    
+    # If no T1CE found, return None
+    return None
+
 def get_session_scans(patient_id, session_id):
     """Get list of all scans (nii.gz files) in a session."""
     session_path = join(COMMON_DATA_PATH, patient_id, "mri_scans", session_id)
@@ -511,8 +534,10 @@ def load_patient_summary_data():
                     try:
                         with open(results_file, 'r') as rf:
                             results_data = json.load(rf)
-                            if 'sess_0' in results_data:
-                                modalities = results_data['sess_0'].get('mod', [])
+                            # Get modalities from latest session (they all follow sess_XX format)
+                            if results_data:
+                                latest_session = sorted(results_data.keys())[-1]
+                                modalities = results_data[latest_session].get('mod', [])
                     except Exception as e:
                         print(f"[WARNING] Could not read modalities from {results_file}: {e}")
             
@@ -589,14 +614,21 @@ def create_patient_table_html(patient_data):
         has_tumor = patient.get('tumor', False)
         is_reviewed = patient.get('reviewed_by_radio', False)
 
-        tumor_class = "tumor-yes" if has_tumor else "tumor-no"
-        tumor_text = "Tumor Present" if has_tumor else "Normal"
+        # Handle None values for has_tumor (pending analysis)
+        if has_tumor is None:
+            tumor_class = "tumor-no"
+            tumor_text = "Pending"
+        else:
+            tumor_class = "tumor-yes" if has_tumor else "tumor-no"
+            tumor_text = "Tumor Present" if has_tumor else "Normal"
         
         reviewed_class = "reviewed-yes" if is_reviewed else "reviewed-no"
         reviewed_text = "Yes" if is_reviewed else "No"
         
         # Determine row class based on requirements
-        if has_tumor and not is_reviewed:
+        if has_tumor is None:
+            row_class = "row-healthy-unreviewed"  # Pending analysis, treat as unreviewed
+        elif has_tumor and not is_reviewed:
             row_class = "row-tumor-unreviewed"
         elif (not has_tumor) and (not is_reviewed):
             row_class = "row-healthy-unreviewed"
@@ -605,14 +637,15 @@ def create_patient_table_html(patient_data):
         else:
             row_class = "row-healthy-reviewed"
         
-        conf_score = patient.get('conf_score', 0.0)
+        conf_score = patient.get('conf_score', None)
+        conf_score_display = f"{conf_score:.2f}" if conf_score is not None else "N/A"
         
         html += f"""
             <tr class="{row_class}">
                 <td class="row-number">{idx + 1}</td>
                 <td><strong>{patient['patient_id']}</strong></td>
                 <td class="{tumor_class}">{tumor_text}</td>
-                <td class="conf-score">{conf_score:.2f}</td>
+                <td class="conf-score">{conf_score_display}</td>
                 <td class="{reviewed_class}">{reviewed_text}</td>
                 <td title="{patient.get('remark', '')}">{patient.get('remark', '')}</td>
                 <td title="{patient.get('modalities', '')}">{patient.get('modalities', '')}</td>
@@ -1157,25 +1190,28 @@ def run_parcellation_analysis(patient_id, session_id_selected, segmentation_path
             segmentation_path,
             mni_t1_path,
             mni_parcellation_path,
-            lut_path
+            lut_path,
+            'Brats'
         ]
         
         print(f"[INFO] Running parcellation: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=2000)
+        print(f"[DEBUG] Parcellation stdout:\n{result.stdout}")
         if result.returncode != 0:
             print(f"[ERROR] Parcellation script failed with return code {result.returncode}")
             print(f"[ERROR] stderr: {result.stderr}")
             return None, None
         
         # Parse output - looking for the line with tumor volume and regions
+
         output_lines = result.stdout.strip().split('\n')
         parcellation_result = None
-        for line in output_lines:
-            if 'ml tumor extending into' in line:
-                parcellation_result = line.strip()
-                break
-        
+        # for line in output_lines:
+        #     if 'ml tumor extending into' in line:
+        #         print(f"[DEBUG] Found parcellation result line: {line}")
+        #         parcellation_result = line.strip()
+        #         break
+        parcellation_result = result.stdout.strip()  # Use full output for now, can be refined to specific lines if needed
         print(f"[INFO] Parcellation result: {parcellation_result}")
         
         # Parse volume from parcellation result
@@ -1364,7 +1400,7 @@ def update_patient_results_json_with_medgemma(patient_id, session_id_selected, c
         # Update fields - store clinical and patient reports separately
         patient_data[session_key]["gemma radiology report"] = clinical_report
         patient_data[session_key]["gemma patient report"] = patient_report
-        
+
         # Save updated data
         with open(patient_results_file, 'w') as f:
             json.dump(patient_data, f, indent=4)
@@ -1409,6 +1445,7 @@ def update_comman_format_json_with_medgemma(patient_id, clinical_report, patient
             if entry.get("pid") == patient_id:
                 entry["gemma radiology report"] = clinical_report
                 entry["gemma patient report"] = patient_report
+                entry["reviewed_by_radio"] = True
                 updated = True
                 print(f"[INFO] Updated patient {patient_id} with both MedGemma reports in comman_format.json")
                 break
@@ -1436,7 +1473,7 @@ def generate_medgemma_reports(patient_id, session_id_selected, scan_name, segmen
     Args:
         patient_id: Patient ID
         session_id_selected: Session ID
-        scan_name: Name of the scan file
+        scan_name: Name of the scan file (will auto-select T1CE if available)
         segmentation_path: Path to segmentation NIfTI file
         parcellation_result: Optional parcellation result string for context
     
@@ -1444,6 +1481,14 @@ def generate_medgemma_reports(patient_id, session_id_selected, scan_name, segmen
         tuple: (clinical_report, patient_report, clinical_docx_path, patient_docx_path)
     """
     try:
+        # Automatically find and use T1CE scan for report generation
+        t1ce_scan = find_t1ce_scan(patient_id, session_id_selected)
+        if t1ce_scan:
+            print(f"[INFO] Using T1CE scan for report generation: {t1ce_scan}")
+            scan_name = t1ce_scan
+        else:
+            print(f"[WARNING] No T1CE scan found, using provided scan: {scan_name}")
+        
         # Get MRI volume path
         mr_volume_path = get_scan_full_path(patient_id, session_id_selected, scan_name)
         if not exists(mr_volume_path):
@@ -2433,13 +2478,25 @@ def seg_track_app():
             # Using partial output capture to debug if needed
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             
+            print(f"[PIPELINE] stdout:\n{result.stdout}")
+            if result.stderr:
+                print(f"[PIPELINE] stderr:\n{result.stderr}")
+            
             if result.returncode == 0:
                 print(f"[INFO] Pipeline finished successfully for {patient_id}")
                 return True, "Analysis pipeline complete."
             else:
                 print(f"[ERROR] Pipeline failed with code {result.returncode}")
                 print(f"[ERROR] stderr: {result.stderr}")
-                return False, f"Pipeline Error: {result.stderr}"
+                return False, f"Pipeline Error: {result.stderr[:200]}"
+        except subprocess.TimeoutExpired:
+            print(f"[ERROR] Pipeline timed out after 600 seconds")
+            return False, "Pipeline timed out (>10 minutes)"
+        except Exception as e:
+            print(f"[ERROR] Pipeline execution failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, f"Pipeline execution error: {str(e)}"
                 
         except Exception as e:
             print(f"[ERROR] Failed to run pipeline: {e}")
@@ -2489,7 +2546,7 @@ def seg_track_app():
                 if not (orig_name.endswith('.nii') or orig_name.endswith('.nii.gz')):
                      print(f"[WARNING] Skipping non-nifti file: {orig_name}")
                      continue
-                     
+                 
                 dest_path = os.path.join(session_dir, orig_name)
                 shutil.copy2(file_obj.name, dest_path)
                 print(f"[INFO] Saved scan to {dest_path}")
@@ -2498,7 +2555,7 @@ def seg_track_app():
             if not saved_files:
                 return "❌ Error: No valid NIfTI files saved.", gr.update(), gr.update()
             
-            # 3. Update JSONs
+            # 3. Update JSONs with INITIAL placeholders
             # comman_format.json
             common_format_path = os.path.join(COMMON_DATA_PATH, "comman_format.json")
             if os.path.exists(common_format_path):
@@ -2511,23 +2568,24 @@ def seg_track_app():
             patient_entry = next((item for item in common_data if item["pid"] == patient_id), None)
             
             if not patient_entry:
-                # Create new entry
+                # Create new entry with NULL values for pipeline to fill
                 new_entry = {
                     "pid": patient_id,
-                    "tumor": None, # "Keep tumor key as None"
+                    "tumor": None,  # Pipeline will update this
+                    "mid_idx": None,  # Pipeline will update this
+                    "conf_score": None,  # Pipeline will update this
                     "reviewed_by_radio": False,
-                    "gemma_hard_coded_remark": None,
-                    # Add timestamp
-                    "created_timestamp": str(datetime.datetime.now())
+                    "gemma_hard_coded_remark": "Pending Analysis",  # Pipeline will update this
+                    "modality_processed": None,  # Pipeline will update this
+                    "created_timestamp": str(datetime.datetime.now()),
+                    "processed_timestamp": None  # Pipeline will update this
                 }
                 common_data.append(new_entry)
-            else:
-                 pass
-                 
+             
             with open(common_format_path, 'w') as f:
                 json.dump(common_data, f, indent=4)
-                
-            # patient_results.json
+            
+            # patient_results.json - Initialize with minimal data
             results_path = os.path.join(patient_dir, "patient_results.json")
             if os.path.exists(results_path):
                 with open(results_path, 'r') as f:
@@ -2535,35 +2593,65 @@ def seg_track_app():
             else:
                 results_data = {}
                 
-            # Add session entry
-            # Collect modalities
+            # Collect modalities from uploaded files
             mods = []
             for fname in saved_files:
                 lower = fname.lower()
-                if "flair" in lower: mods.append("flair")
-                elif "t1" in lower: mods.append("t1")
-                elif "t2" in lower: mods.append("t2")
-                else: mods.append("unknown")
-                
+                if "flair" in lower or "t2f" in lower:
+                    mods.append("flair")
+                elif "t1" in lower:
+                    mods.append("t1")
+                elif "t2" in lower and "flair" not in lower:
+                    mods.append("t2")
+                else:
+                    mods.append("unknown")
+        
+            # Initialize session with placeholders - pipeline will fill these
             results_data[session_id] = {
-                # Initialize with empty/default
                 "mod": mods,
-                "gemma_hard_coded_remark": "Pending Analysis"
+                "mid_idx": None,  # Pipeline will update
+                "tumor": None,  # Pipeline will update
+                "conf_score": None,  # Pipeline will update
+                "gemma_hard_coded_remark": "Pending Analysis",  # Pipeline will update
+                "modality_processed": None,  # Pipeline will update
+                "processed_timestamp": None  # Pipeline will update
             }
-            
+        
             with open(results_path, 'w') as f:
                 json.dump(results_data, f, indent=4)
-                
-            # 4. Trigger Analysis
-            status_msg = f"✅ Upload successful!\n- Patient: {patient_id}\n- Session: {session_id}\n- Files: {', '.join(saved_files)}\n\nRunning analysis pipeline..."
+            
+            # 4. Trigger Analysis Pipeline and WAIT for completion
+            status_msg = f"✅ Upload successful!\n- Patient: {patient_id}\n- Session: {session_id}\n- Files: {', '.join(saved_files)}\n\n🔄 Running analysis pipeline (this may take 30-60 seconds)...\n"
             
             success, pipe_msg = run_pipeline_for_patient(patient_id)
             
-            final_status = f"{status_msg}\n\n{pipe_msg}"
+            # 5. Verify results were written
+            verification_msg = ""
+            if success:
+                # Check if patient_results.json was updated
+                try:
+                    with open(results_path, 'r') as f:
+                        updated_results = json.load(f)
+                    session_data = updated_results.get(session_id, {})
+                    mid_idx = session_data.get('mid_idx')
+                    tumor = session_data.get('tumor')
+                    remark = session_data.get('gemma_hard_coded_remark')
+                    
+                    if mid_idx is not None and remark != "Pending Analysis":
+                        verification_msg = f"\n\n✅ Verified: mid_idx={mid_idx}, tumor={tumor}, remark={remark}"
+                    else:
+                        verification_msg = f"\n\n⚠️ Warning: Pipeline completed but data may not be fully updated (mid_idx={mid_idx})"
+                except Exception as e:
+                    verification_msg = f"\n\n⚠️ Could not verify results: {e}"
             
+            if success:
+                final_status = f"{status_msg}\n✅ {pipe_msg}{verification_msg}\n\n📊 **Results updated in patient records.**"
+            else:
+                final_status = f"{status_msg}\n⚠️ {pipe_msg}\n\n**Note:** Some fields may not be populated. Check logs."
+        
             # Refresh patient list for dropdown
             return final_status, gr.update(value=get_next_patient_id()), gr.update(choices=get_patient_list())
-            
+        
         except Exception as e:
             print(f"[ERROR] Upload handler failed: {e}")
             import traceback
@@ -2747,6 +2835,9 @@ def seg_track_app():
         color: #000000;
         font-size: 0.85em;
     }
+    .patient-table td:nth-child(2) strong {
+        color: #000000;
+    }
 
     /* Legend CSS */
     .legend-container {
@@ -2790,8 +2881,7 @@ def seg_track_app():
             '''
             <div style="text-align:center; margin-bottom:20px;">
                 <span style="font-size:3em; font-weight:bold;">GEMMA3S: Spot, Segment & Simplify</span>
-                <br>
-                <span style="font-size:0.9em; color:#666;">Powered by <a href="https://github.com/bowang-lab/MedSAM2" target="_blank">MedSAM2</a> • Bo Wang Lab, University of Toronto</span>
+
             </div>
             '''
         )
@@ -2866,7 +2956,7 @@ def seg_track_app():
                         scale=3
                     )
                     go_to_segmentation_btn = gr.Button(
-                        "🔬 Load & Go to Segmentation →",
+                        "🔬 Load & Segment →",
                         variant="primary",
                         scale=1
                     )
@@ -2935,17 +3025,6 @@ def seg_track_app():
                 
                 gr.Markdown(
                     '''
-                    <div style="text-align:center; margin-bottom:20px;">
-                        <a href="https://github.com/bowang-lab/MedSAM/tree/MedSAM2">
-                            <img src="https://badges.aleen42.com/src/github.svg" alt="GitHub" style="display:inline-block; margin-right:10px;">
-                        </a>
-                        <a href="https://arxiv.org/abs/2408.03322">
-                            <img src="https://img.shields.io/badge/arXiv-2408.03322-green?style=plastic" alt="Paper" style="display:inline-block; margin-right:10px;">
-                        </a>
-                        <a href="https://github.com/bowang-lab/MedSAMSlicer/tree/MedSAM2">
-                            <img src="https://img.shields.io/badge/3D-Slicer-Plugin" alt="3D Slicer Plugin" style="display:inline-block; margin-right:10px;">
-                        </a>
-                    </div>
                     <div style="text-align:left; margin-bottom:20px;">
                         This API supports using point prompts for medical image and video segmentation.
                     </div>
@@ -2960,15 +3039,6 @@ def seg_track_app():
                             <li>7. Download the results</li>
                         </ol>
                     </div>
-                    <div style="text-align:left; line-height:1.8;">
-                        If you find these tools useful, please consider citing the following papers:
-                    </div>
-                    <div style="text-align:left; line-height:1.8;">
-                        Ravi, N., Gabeur, V., Hu, Y.T., Hu, R., Ryali, C., Ma, T., Khedr, H., Rädle, R., Rolland, C., Gustafson, L., Mintun, E., Pan, J., Alwala, K.V., Carion, N., Wu, C.Y., Girshick, R., Dollár, P., Feichtenhofer, C.: SAM 2: Segment Anything in Images and Videos. ICLR 2025
-                    </div>            
-                    <div style="text-align:left; line-height:1.8;">
-                        Ma, J.*, Yang, Z.*, Kim, S., Chen, B., Baharoon, M., Fallahpour, A, Asakereh, R., Lyu, H., Wang, B.: MedSAM2: Segment Anything in Medical Images and Videos. arXiv preprint (2025)
-                    </div> 
                     '''
                 )
 
@@ -3088,7 +3158,6 @@ def seg_track_app():
                         gr.Markdown("### 🧠 Qualitative Analysis (MedGemma)")
                         gr.Markdown("Generate AI-powered clinical and patient-friendly reports.")
                         generate_reports_btn = gr.Button("✨ Generate AI Reports", variant="primary")
-                        medgemma_status = gr.Textbox(label="Status", value="", lines=3, interactive=False, show_label=False)
                         
                         gr.Markdown("---")
                         gr.Markdown("#### 📋 Clinical Report")
@@ -3439,7 +3508,7 @@ def seg_track_app():
             
             return (
                 tabs_update, info_text, patient_info, 
-                True,   # skip_video_change - prevent input_video.change from resetting slider
+                True,   # skip_video_change - prevent input_video.change from resetting
                 video_update,
                 *meta_results
             )
@@ -3567,16 +3636,14 @@ def seg_track_app():
             try:
                 safe_progress(0, "Initializing...")
                 if not (patient_info and isinstance(patient_info, dict)):
-                    return "❌ **Error:** No scan selected. Please select a patient and complete segmentation first.", \
-                           "*No report generated.*", "*No report generated.*", None, None
+                    return "*No report generated.*", "*No report generated.*", None, None
                 
                 patient_id = patient_info.get("patient_id")
                 session_id_selected = patient_info.get("session_id")
                 scan_name = patient_info.get("scan_name")
                 
                 if not (patient_id and session_id_selected and scan_name):
-                    return "❌ **Error:** Incomplete scan information.", \
-                           "*No report generated.*", "*No report generated.*", None, None
+                    return "*No report generated.*", "*No report generated.*", None, None
                 
                 # Look for the segmentation file in patient folder
                 patient_folder = join(COMMON_DATA_PATH, patient_id)
@@ -3584,14 +3651,10 @@ def seg_track_app():
                 
                 if not os.path.exists(segmentation_path):
                     return (
-                        "❌ **Error:** Segmentation file not found. "
-                        "Please complete segmentation and click 'Convert to NIfTI & Calculate Volume' first.\n\n"
-                        f"Expected file: `{segmentation_path}`",
                         "*No report generated.*", "*No report generated.*", None, None
                     )
                 
                 # Try to get parcellation result from patient_results.json
-                progress(0.1, desc="Reading context...")
                 parcellation_result = None
                 try:
                     patient_results_file = join(patient_folder, "patient_results.json")
@@ -3606,7 +3669,6 @@ def seg_track_app():
                 
                 # Generate reports
                 safe_progress(0.2, desc="Loading Model (may take 60s)...")
-                status_msg = "🔄 **Generating reports with MedGemma...**\n\n"
                 
                 safe_progress(0.4, desc="Generating Reports...")
                 try:
@@ -3617,7 +3679,6 @@ def seg_track_app():
                     print(f"[ERROR] generate_medgemma_reports failed: {gen_error}")
                     traceback.print_exc()
                     return (
-                        f"❌ **Error:** Failed to generate MedGemma reports.\n\n**Details:** {str(gen_error)}",
                         "*Report generation failed.*", "*Report generation failed.*", 
                         None, None
                     )
@@ -3626,7 +3687,6 @@ def seg_track_app():
                 
                 if clinical_report is None or patient_report is None:
                     return (
-                        "❌ **Error:** Failed to generate MedGemma reports. Check the console for details.",
                         "*Report generation failed.*", "*Report generation failed.*", 
                         None, None
                     )
@@ -3637,35 +3697,16 @@ def seg_track_app():
                 
                 # Update JSON files with both reports
                 safe_progress(0.95, desc="Updating records...")
-                json_status = ""
                 
                 # Update patient_results.json (session level)
-                if update_patient_results_json_with_medgemma(patient_id, session_id_selected, clinical_report_str, patient_report_str):
-                    json_status += "✅ **Updated patient_results.json**\n"
-                else:
-                    json_status += "⚠️ **Warning: Failed to update patient_results.json**\n"
+                update_patient_results_json_with_medgemma(patient_id, session_id_selected, clinical_report_str, patient_report_str)
 
                 # Update comman_format.json (patient level)
-                if update_comman_format_json_with_medgemma(patient_id, clinical_report_str, patient_report_str):
-                    json_status += "✅ **Updated comman_format.json**\n"
-                else:
-                    json_status += "⚠️ **Warning: Failed to update comman_format.json**\n"
-                
-                status_msg = f"✅ **MedGemma reports generated successfully!**\n\n"
-                status_msg += f"- **Patient:** {patient_id}\n"
-                status_msg += f"- **Session:** {session_id_selected}\n"
-                
-                if clinical_docx_path and os.path.exists(clinical_docx_path):
-                    status_msg += f"- **Clinical Report:** `{clinical_docx_path}`\n"
-                if patient_docx_path and os.path.exists(patient_docx_path):
-                    status_msg += f"- **Patient Report:** `{patient_docx_path}`\n"
-                
-                status_msg += f"\n**Record Updates:**\n{json_status}"
+                update_comman_format_json_with_medgemma(patient_id, clinical_report_str, patient_report_str)
                 
                 safe_progress(1.0, "Done!")
                 
                 # Debug: log exactly what we're returning
-                print(f"[DEBUG] Return status_msg length: {len(status_msg)}")
                 print(f"[DEBUG] Return clinical_report length: {len(clinical_report_str)}")
                 print(f"[DEBUG] Return patient_report length: {len(patient_report_str)}")
                 print(f"[DEBUG] Return clinical_docx_path: {clinical_docx_path}")
@@ -3681,7 +3722,6 @@ def seg_track_app():
                 print(f"[DEBUG] clinical_file_result: {clinical_file_result}")
                 print(f"[DEBUG] patient_file_result: {patient_file_result}")
                 return (
-                    status_msg,
                     clinical_report_str,
                     patient_report_str,
                     clinical_file_result,
@@ -3692,7 +3732,6 @@ def seg_track_app():
                 print(f"[CRITICAL ERROR] Exception in handle_generate_medgemma_reports: {e}")
                 traceback.print_exc()
                 return (
-                    f"❌ **Critical Error:** {str(e)}",
                     "*Error occurred.*", "*Error occurred.*", 
                     None, None
                 )
@@ -3717,7 +3756,6 @@ def seg_track_app():
             try:
                 if not (patient_info and isinstance(patient_info, dict)):
                     return (
-                        "⏭️ Skipped AI report generation (no patient selected).",
                         "*No report generated.*",
                         "*No report generated.*",
                         None, None
@@ -3729,7 +3767,6 @@ def seg_track_app():
                 
                 if not (patient_id and session_id_selected and scan_name):
                     return (
-                        "⏭️ Skipped AI report generation (incomplete scan info).",
                         "*No report generated.*",
                         "*No report generated.*",
                         None, None
@@ -3741,7 +3778,6 @@ def seg_track_app():
                 
                 if not os.path.exists(segmentation_path):
                     return (
-                        f"⏭️ Skipped AI report generation (no segmentation file found).\n\nExpected: `{segmentation_path}`",
                         "*No report generated.*",
                         "*No report generated.*",
                         None, None
@@ -3756,6 +3792,7 @@ def seg_track_app():
                             results_data = json.load(f)
                         session_data = results_data.get(session_id_selected, {})
                         parcellation_result = session_data.get("manual report from SAM", None)
+                        print(f"[INFO] Found parcellation context: {parcellation_result}")
                 except Exception as e:
                     print(f"[WARNING] Could not read parcellation result: {e}")
                 
@@ -3769,7 +3806,6 @@ def seg_track_app():
                     print(f"[AUTO-CHAIN ERROR] generate_medgemma_reports failed: {gen_error}")
                     traceback.print_exc()
                     return (
-                        f"❌ **Error:** Failed to generate MedGemma reports.\n\n**Details:** {str(gen_error)}",
                         "*Report generation failed.*",
                         "*Report generation failed.*",
                         None, None
@@ -3779,7 +3815,6 @@ def seg_track_app():
                 
                 if clinical_report is None or patient_report is None:
                     return (
-                        "❌ **Error:** Failed to generate MedGemma reports. Check console for details.",
                         "*Report generation failed.*",
                         "*Report generation failed.*",
                         None, None
@@ -3803,22 +3838,22 @@ def seg_track_app():
                     print(f"[AUTO-CHAIN WARNING] JSON update failed: {json_error}")
                     json_status += "⚠️ Warning: Failed to update JSON files\n"
                 
-                status_msg = f"✅ **MedGemma reports generated automatically!**\n\n"
-                status_msg += f"- **Patient:** {patient_id}\n"
-                status_msg += f"- **Session:** {session_id_selected}\n"
+                # status_msg = f"✅ **MedGemma reports generated automatically!**\n\n"
+                # status_msg += f"- **Patient:** {patient_id}\n"
+                # status_msg += f"- **Session:** {session_id_selected}\n"
                 
                 # Copy files for reliable Gradio download and path handling
                 clinical_path_ret = None
                 if clinical_docx_path and os.path.exists(clinical_docx_path):
-                    status_msg += f"- **Clinical Report:** `{clinical_docx_path}`\n"
+                    # status_msg += f"- **Clinical Report:** `{clinical_docx_path}`\n"
                     clinical_path_ret = copy_file_for_gradio_download(clinical_docx_path)
                     
                 patient_path_ret = None
                 if patient_docx_path and os.path.exists(patient_docx_path):
-                    status_msg += f"- **Patient Report:** `{patient_docx_path}`\n"
+                    # status_msg += f"- **Patient Report:** `{patient_docx_path}`\n"
                     patient_path_ret = copy_file_for_gradio_download(patient_docx_path)
                 
-                status_msg += f"\n**Records:** {json_status}"
+                # status_msg += f"\n**Records:** {json_status}"
                 
                 # Check file existence one last time
                 if clinical_path_ret and not os.path.exists(clinical_path_ret):
@@ -3829,7 +3864,6 @@ def seg_track_app():
                     patient_path_ret = None
 
                 print(f"[AUTO-CHAIN DEBUG] Final Return Values:")
-                print(f"  status_msg: {type(status_msg)} - '{status_msg[:100]}...'")
                 print(f"  clinical_report_str: {type(clinical_report_str)} - '{clinical_report_str[:100]}...'")
                 print(f"  patient_report_str: {type(patient_report_str)} - '{patient_report_str[:100]}...'")
                 print(f"  clinical_path_ret: {clinical_path_ret} ({type(clinical_path_ret)})")
@@ -3837,7 +3871,6 @@ def seg_track_app():
                 
                 # Return raw text values; textbox rendering is handled in a follow-up .then()
                 return (
-                    status_msg,
                     clinical_report_str,
                     patient_report_str,
                     clinical_path_ret,
@@ -3848,7 +3881,6 @@ def seg_track_app():
                 print(f"[AUTO-CHAIN CRITICAL ERROR] Unexpected exception in auto_generate_medgemma_reports: {e}")
                 traceback.print_exc()
                 return (
-                    f"❌ **Critical Error:** {str(e)}",
                     "*Error occurred.*",
                     "*Error occurred.*",
                     None, None
@@ -3863,7 +3895,7 @@ def seg_track_app():
         ).then(
             fn=auto_generate_medgemma_reports,
             inputs=[selected_patient_info],
-            outputs=[medgemma_status, clinical_report_state, patient_report_state, clinical_docx_file, patient_docx_file]
+            outputs=[clinical_report_state, patient_report_state, clinical_docx_file, patient_docx_file]
         ).then(
             fn=render_report_textboxes,
             inputs=[clinical_report_state, patient_report_state],
@@ -3878,7 +3910,7 @@ def seg_track_app():
         generate_reports_btn.click(
             fn=auto_generate_medgemma_reports,
             inputs=[selected_patient_info],
-            outputs=[medgemma_status, clinical_report_state, patient_report_state, clinical_docx_file, patient_docx_file]
+            outputs=[clinical_report_state, patient_report_state, clinical_docx_file, patient_docx_file]
         ).then(
             fn=render_report_textboxes,
             inputs=[clinical_report_state, patient_report_state],
@@ -3900,7 +3932,7 @@ def seg_track_app():
         
     app.queue(default_concurrency_limit=1)
     server_port = int(os.getenv("GRADIO_SERVER_PORT", "18863"))
-    app.launch(debug=True, share=False, server_name="0.0.0.0", server_port=server_port,
+    app.launch(debug=True, share=True, server_name="0.0.0.0", server_port=server_port,
                allowed_paths=[COMMON_DATA_PATH, GRADIO_TEMP_DIR], css=css)
     # app.launch(debug=True, enable_queue=True, share=True)
 

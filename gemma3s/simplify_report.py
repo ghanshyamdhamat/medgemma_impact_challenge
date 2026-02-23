@@ -95,20 +95,20 @@ class MedGemmaSimplify:
 
         instruction = (
 "You are a senior neuroradiologist reporting assistant preparing a finalized imaging report.\n\n"
-
-"You are shown an axial flair brain MRI image. "
+ 
+"You are shown an axial T1-weighted contrast enhanced brain MRI image. "
 "A rectangular bounding box highlights a region of interest.\n\n"
-
+ 
 "You are also provided with **background anatomical context** derived from "
 "prior volumetric analysis of this subject. This context may help orient "
 "anatomical descriptions.\n\n"
-
+ 
 "IMPORTANT OUTPUT RULES (Follow strictly!!):\n"
 "- Do NOT include your reasoning, thoughts, analysis, or checklists\n"
 "- Do NOT describe your planning process\n"
 "- Do NOT include confidence scores or self-evaluation\n"
 "- Output ONLY the final imaging report sections requested.\n\n"
-
+ 
 "Describe the visual characteristics of the tissue inside the bounded region "
 "based on what is visible in the image.\n\n"
 )

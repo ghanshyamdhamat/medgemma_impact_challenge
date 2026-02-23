@@ -119,13 +119,14 @@ def predict_volume_tumor(model, processor, volume_path):
     -------
     predictions : list[int]   – 1 = tumor, 0 = normal (per valid slice)
     slice_results : dict[int, float] – {axial_index: confidence_score}
+    first_slice : int – first valid slice index (for coordinate mapping)
     """
     vol = nib.load(str(volume_path)).get_fdata()
     first, last = find_valid_slice_range(vol, VALID_SLICE_THRESHOLD)
 
     if first is None or last is None:
         print(f"No valid slices in {volume_path}")
-        return [], {}
+        return [], {}, 0
 
     predictions = []
     slice_results = {}
@@ -161,16 +162,24 @@ def predict_volume_tumor(model, processor, volume_path):
         slice_results[z] = confidence
         predictions.append(1 if pred_idx == 0 else 0)
 
-    return predictions, slice_results
+    return predictions, slice_results, first
 
 
-def important_slice(predictions: list[int]):
+def important_slice(predictions: list[int], slice_offset: int = 0):
     """
     Find the mid-index of the largest contiguous tumor interval.
+
+    Args
+    ----
+    predictions : list[int]
+        Binary predictions (1=tumor, 0=normal) for consecutive slices
+    slice_offset : int
+        Offset to add to returned index (first valid slice index from volume)
 
     Returns
     -------
     mid_index : int
+        Actual axial slice index in the volume
     has_tumor : bool
     """
     intervals = []
@@ -191,24 +200,28 @@ def important_slice(predictions: list[int]):
 
     if not intervals:
         print("No predicted tumor interval found.")
-        return len(predictions) // 2, False
+        mid_index_relative = len(predictions) // 2
+        return mid_index_relative + slice_offset, False
 
     largest = max(intervals, key=lambda x: x[1] - x[0])
     length = largest[1] - largest[0] + 1
 
     if length >= TUMOR_SLICE_CUTOFF:
         has_tumor = True
-        mid_index = (largest[0] + largest[1]) // 2
+        mid_index_relative = (largest[0] + largest[1]) // 2
     else:
         if largest[0] <= len(predictions) // 2 <= largest[1]:
-            mid_index = largest[1] + 1
+            mid_index_relative = largest[1] + 1
         else:
-            mid_index = len(predictions) // 2
+            mid_index_relative = len(predictions) // 2
+
+    # Add offset to convert from predictions-list index to actual volume slice index
+    mid_index_actual = mid_index_relative + slice_offset
 
     print(f"Largest interval: start={largest[0]}, end={largest[1]}, length={length}")
-    print(f"Mid index (0-based): {mid_index}")
+    print(f"Mid index (relative): {mid_index_relative}, (actual): {mid_index_actual}")
 
-    return mid_index, has_tumor
+    return mid_index_actual, has_tumor
 
 
 # ──────────────────────────────────────────────
@@ -239,101 +252,135 @@ def process_patient(patient_entry: dict, config_data: dict, config_path: str,
     pid_dir = BASE_DATA_DIR / str(pid)
     print(f"Processing patient: {pid}  path: {pid_dir}")
 
-    # Load patient-specific JSON
-    pid_json_files = list(pid_dir.glob(f"patient_results.json"))
-    if not pid_json_files:
-        print(f"Error: No patient JSON found for {pid}")
-        # Create one if missing? For now, skip or maybe creating it is better.
-        # But per requirements, we just process. Let's return None if critical file missing.
-        return None
-    
-    pid_json_path = pid_json_files[0]
     try:
-        with open(pid_json_path, "r") as f:
-            if os.stat(pid_json_path).st_size == 0:
-                pid_data = {}
-            else:
-                pid_data = json.load(f)
-    except json.JSONDecodeError:
-        print(f"Warning: JSON decode error for {pid_json_path}. initializing empty dict.")
-        pid_data = {}
-
-    # Find the latest session or all sessions? 
-    # The snippet used sorted(pid_data.keys())[-1], implying last session.
-    # We will stick to that logic for now.
-    if not pid_data:
-        # If empty, try to infer session from directory structure
-        session_dirs = sorted([d.name for d in (pid_dir / "mri_scans").iterdir() if d.is_dir()])
-        if session_dirs:
-            # Initialize for found sessions
-            for sess in session_dirs:
-                pid_data[sess] = {}
-        else:
-            print(f"Error: Empty patient JSON for {pid} and no sessions found on disk")
+        # Load patient-specific JSON
+        pid_json_files = list(pid_dir.glob(f"patient_results.json"))
+        if not pid_json_files:
+            print(f"Error: No patient JSON found for {pid}")
+            # Create one if missing? For now, skip or maybe creating it is better.
+            # But per requirements, we just process. Let's return None if critical file missing.
             return None
         
-    sess_id = sorted(pid_data.keys())[-1]
-    
-    # Locate FLAIR NIfTI
-    # Path: common_data/pid_XXX/mri_scans/sess_XX/*flair*.nii*
-    flair_files = list((pid_dir / "mri_scans"/sess_id).rglob("*flair*.nii*")) + list((pid_dir / "mri_scans"/sess_id).rglob("*t2f*.nii*"))
-    if not flair_files:
-        print(f"Error: No FLAIR file found for {pid} session {sess_id}")
-        return None
+        pid_json_path = pid_json_files[0]
+        try:
+            with open(pid_json_path, "r") as f:
+                if os.stat(pid_json_path).st_size == 0:
+                    pid_data = {}
+                else:
+                    pid_data = json.load(f)
+        except json.JSONDecodeError:
+            print(f"Warning: JSON decode error for {pid_json_path}. initializing empty dict.")
+            pid_data = {}
 
-    mri_nii_path = flair_files[0]
-    print(f"Using FLAIR: {mri_nii_path}")
+        # Find the latest session or all sessions? 
+        # The snippet used sorted(pid_data.keys())[-1], implying last session.
+        # We will stick to that logic for now.
+        if not pid_data:
+            # If empty, try to infer session from directory structure
+            session_dirs = sorted([d.name for d in (pid_dir / "mri_scans").iterdir() if d.is_dir()])
+            if session_dirs:
+                # Initialize for found sessions
+                for sess in session_dirs:
+                    pid_data[sess] = {}
+            else:
+                print(f"Error: Empty patient JSON for {pid} and no sessions found on disk")
+                return None
+            
+        sess_id = sorted(pid_data.keys())[-1]
+        
+        # Locate FLAIR NIfTI
+        # Path: common_data/pid_XXX/mri_scans/sess_XX/*flair*.nii*
+        flair_files = list((pid_dir / "mri_scans"/sess_id).rglob("*flair*.nii*")) + list((pid_dir / "mri_scans"/sess_id).rglob("*t2f*.nii*")) + list((pid_dir / "mri_scans"/sess_id).rglob("*FLAIR*.nii*"))
+        if not flair_files:
+            print(f"Error: No FLAIR file found for {pid} session {sess_id}")
+            return None
 
-    # Run prediction
-    predictions, slice_results = predict_volume_tumor(model, processor, mri_nii_path)
-    mid_index, has_tumor = important_slice(predictions)
-    confidence_score = slice_results.get(mid_index, 0.0)
+        mri_nii_path = flair_files[0]
+        print(f"Using FLAIR: {mri_nii_path}")
 
-    gemma_remark = "Tumor detected on FLAIR" if has_tumor else "No tumor detected on FLAIR"
-    timestamp = str(np.datetime64("now"))
+        # Run prediction
+        predictions, slice_results, first_slice = predict_volume_tumor(model, processor, mri_nii_path)
+        mid_index, has_tumor = important_slice(predictions, slice_offset=first_slice)
 
-    # Update patient JSON
-    if sess_id in pid_data:
-        pid_data[sess_id].update({
+        # confidence_score = slice_results.get(mid_index, 0.0)
+        
+        # Calculate average confidence of all non-tumor slices
+        non_tumor_confidences = []
+        for i, pred in enumerate(predictions):
+            if pred == 0:  # non-tumor slice
+                actual_slice_idx = first_slice + i
+                if actual_slice_idx in slice_results:
+                    non_tumor_confidences.append(slice_results[actual_slice_idx])
+        
+        # Use average of non-tumor slice confidences, or fallback to mid_index confidence
+        if non_tumor_confidences:
+            confidence_score = sum(non_tumor_confidences) / len(non_tumor_confidences)
+        else:
+            confidence_score = slice_results.get(mid_index, 0.0)
+        
+        # Old method: single slice confidence
+        # confidence_score = slice_results.get(mid_index, 0.0)
+
+        gemma_remark = "Tumor detected on FLAIR" if has_tumor else "No tumor detected on FLAIR"
+        timestamp = str(np.datetime64("now"))
+
+        print(f"[RESULTS] mid_index={mid_index}, has_tumor={has_tumor}, confidence={confidence_score:.3f}")
+        print(f"[RESULTS] remark={gemma_remark}")
+
+        # Update patient JSON
+        if sess_id in pid_data:
+            print(f"[UPDATE] Updating patient_results.json for session {sess_id}")
+            pid_data[sess_id].update({
+                "mid_idx": mid_index,
+                "tumor": has_tumor, # Lowercase key
+                "conf_score": float(confidence_score),
+                "modality_processed": "flair",
+                "gemma_hard_coded_remark": gemma_remark,
+                "processed_timestamp": timestamp,
+            })
+            print(f"[UPDATE] Session data after update: {pid_data[sess_id]}")
+        else:
+            print(f"Warning: Session {sess_id} not in pid_data keys from json.")
+
+        with open(pid_json_path, "w") as f:
+            json.dump(pid_data, f, indent=4)
+        print(f"[SAVED] patient_results.json written to {pid_json_path}")
+
+        # Update master config entry
+        # Finding the entry in the list again to be safe (though 'patient_entry' is a ref)
+        # We need to update the entry in 'config_data' which is a list.
+        
+        print(f"[UPDATE] Updating comman_format.json entry for {pid}")
+        patient_entry.update({
             "mid_idx": mid_index,
             "tumor": has_tumor, # Lowercase key
             "conf_score": float(confidence_score),
             "modality_processed": "flair",
             "gemma_hard_coded_remark": gemma_remark,
+            # "reviewed_by_radio": False, # It was already false to get here. 
+            # Requirement: "Run ... and update comman_format.json in gemma_hard_coded_remark."
+            # It doesn't explicitly say set reviewed_by_radio to True, but usually pipeline implies doing the work.
+            # But per logic, if we leave it false, it picks it up again?
+            # Let's keep reviewed_by_radio as False or maybe we should set it to True aka 'Processed by AI'? 
+            # Actually 'reviewed_by_radio' likely means Radiologist. So AI processing leaves it False.
             "processed_timestamp": timestamp,
         })
-    else:
-         print(f"Warning: Session {sess_id} not in pid_data keys from json.")
+        print(f"[UPDATE] Patient entry after update: mid_idx={patient_entry.get('mid_idx')}, tumor={patient_entry.get('tumor')}")
+        
+        # Write back the full list
+        with open(config_path, "w") as f:
+            json.dump(config_data, f, indent=4)
+        print(f"[SAVED] comman_format.json written to {config_path}")
 
-    with open(pid_json_path, "w") as f:
-        json.dump(pid_data, f, indent=4)
-
-    # Update master config entry
-    # Finding the entry in the list again to be safe (though 'patient_entry' is a ref)
-    # We need to update the entry in 'config_data' which is a list.
+        print(f"Finished patient: {pid}")
+        print("=" * 100)
+        return patient_entry
     
-    patient_entry.update({
-        "mid_idx": mid_index,
-        "tumor": has_tumor, # Lowercase key
-        "conf_score": float(confidence_score),
-        "modality_processed": "flair",
-        "gemma_hard_coded_remark": gemma_remark,
-        # "reviewed_by_radio": False, # It was already false to get here. 
-        # Requirement: "Run ... and update comman_format.json in gemma_hard_coded_remark."
-        # It doesn't explicitly say set reviewed_by_radio to True, but usually pipeline implies doing the work.
-        # But per logic, if we leave it false, it picks it up again?
-        # Let's keep reviewed_by_radio as False or maybe we should set it to True aka 'Processed by AI'? 
-        # Actually 'reviewed_by_radio' likely means Radiologist. So AI processing leaves it False.
-        "processed_timestamp": timestamp,
-    })
-    
-    # Write back the full list
-    with open(config_path, "w") as f:
-        json.dump(config_data, f, indent=4)
-
-    print(f"Finished patient: {pid}")
-    print("=" * 100)
-    return patient_entry
+    except Exception as e:
+        print(f"[ERROR] Exception processing patient {pid}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def process_all_pending_patients(config_path: str, model, processor):

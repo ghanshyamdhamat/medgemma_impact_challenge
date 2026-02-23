@@ -3,7 +3,7 @@ import nibabel as nib
 import ants
 import sys
 
-def process_parcellation(parcellation, segmentation_path, lut_path, volume):
+def process_parcellation(parcellation, segmentation_path, lut_path, volume, dataset_name="Brats"):
     lobe_map = {
         'Frontal': [
             'superiorfrontal', 'rostralmiddlefrontal', 'caudalmiddlefrontal',
@@ -48,6 +48,38 @@ def process_parcellation(parcellation, segmentation_path, lut_path, volume):
     labels = parcellation.flatten()
     missing_labels = [label for label in labels if label not in lut_dict]
     label_names = {label: lut_dict.get(label, 'Unknown') for label in labels}
+    # print("Label names:", label_names)
+    # Replace "Right-" and "-rh-" with "left-" in all values
+
+    if dataset_name == "Brats": # Left ↔ Right labels are interchanged because BRATS uses inverted orientation / transformed coordinates.
+        import re
+        def convert_label(value):
+            # Handle cortical regions: ctx-lh-region or ctx-rh-region
+            m = re.match(r'ctx-(lh|rh)-(.+)', value)
+            if m:
+                hemi, region = m.groups()
+                # Flip hemisphere for BRATS
+                hemi_word = "left" if hemi == "rh" else "right"
+                result = f"{hemi_word} {region} cortex".replace("-", " ")
+            # Handle white matter: wm-lh-region or wm-rh-region
+            elif re.match(r'wm-(lh|rh)-(.+)', value):
+                m = re.match(r'wm-(lh|rh)-(.+)', value)
+                hemi, region = m.groups()
+                hemi_word = "left" if hemi == "rh" else "right"
+                result = f"{hemi_word} {region} white matter".replace("-", " ")
+            # Handle subcortical: Left-X or Right-X
+            elif value.startswith("Right-"):
+                result = ("Left " + value[6:]).replace("-", " ")
+            elif value.startswith("Left-"):
+                result = ("Right " + value[5:]).replace("-", " ")
+            else:
+                result = value.replace("-", " ")
+            
+            # Add space before temporal, frontal, parietal, occipital, cingulate if connected
+            result = re.sub(r'(\w)(temporal|frontal|parietal|occipital|cingulate)', r'\1 \2', result, flags=re.IGNORECASE)
+            return result
+
+        label_names = {label: convert_label(value) for label, value in label_names.items()}
 
     parcel = parcellation
     mask = nib.load(segmentation_path).get_fdata()
@@ -66,7 +98,7 @@ def process_parcellation(parcellation, segmentation_path, lut_path, volume):
     # Sort by voxel_count descending
     parcels_sorted = sorted(parcels, key=lambda x: x[2], reverse=True)
 
-    # Keep only first occurrence of each unique label
+    # Keep only first occurrence of each unique label, up to 7
     seen_labels = set()
     unique_parcels = []
     for val, label, voxel_count in parcels_sorted:
@@ -76,8 +108,56 @@ def process_parcellation(parcellation, segmentation_path, lut_path, volume):
         if len(unique_parcels) == 7:
             break
 
+    # Filter out Unknown and small regions
     unique_parcels_filtered = [parcel for parcel in unique_parcels if parcel[1] != 'Unknown' and parcel[2] >= 100]
-    print(f"{int(volume/1000)} ml tumor extending into {', '.join(parcel[1] for parcel in unique_parcels_filtered)} regions.")
+
+    # Group by hemisphere, keeping volume order within each group
+    left_parcels = [p for p in unique_parcels_filtered if p[1].lower().startswith('left')]
+    right_parcels = [p for p in unique_parcels_filtered if p[1].lower().startswith('right')]
+    other_parcels = [p for p in unique_parcels_filtered if not p[1].lower().startswith('left') and not p[1].lower().startswith('right')]
+    
+    # Majority hemisphere first; minority hemisphere only if voxel_count > 500
+    if len(left_parcels) >= len(right_parcels):
+        right_parcels = [p for p in right_parcels if p[2] > 500]
+        unique_parcels_filtered = left_parcels + right_parcels + other_parcels
+    else:
+        left_parcels = [p for p in left_parcels if p[2] > 500]
+        unique_parcels_filtered = right_parcels + left_parcels + other_parcels
+
+    volume_ml = int(volume / 1000)
+
+    regions_formatted = "\n".join(f" - {parcel[1].replace('-', ' ').capitalize()}"
+                              for parcel in unique_parcels_filtered)
+
+    regions_formatted_list = [parcel[1] for parcel in unique_parcels_filtered]
+
+    lines = []
+
+    # First line
+    lines.append("\\\"Background anatomical context:\\n\"")
+
+    # Volume line
+    lines.append(f"\"- Known tumor volume: approximately {volume_ml} ml\\n\"")
+    # Header line
+    lines.append("\"- Previously reported regional involvement includes:\\n\"")
+
+    # Dynamic regions
+    for region in regions_formatted_list:
+        lines.append(f"\" - {region}\\n\"")
+
+    # Extra literal and real newline between regions and final line
+    lines.append("\"\\n\"")   # literal "\n"
+    # OR: lines.append("\"\\n\\n\"") if you want literal \n\n
+
+    # Final note line
+    lines.append("\"This information is provided for contextual reference only.\"")
+
+    # Join with REAL newline characters between lines
+    parcellation_context = "\n".join(lines)
+
+
+    print(parcellation_context)
+
   
 
 
@@ -103,18 +183,18 @@ def register_images(mni_t1_path, mni_parcellation_path, input_t1_path):
     )
     return warped_mask.numpy()  
 
-def main(input_t1_path, sam_output_path, mni_t1_path, mni_parcellation_path, lut_path):
+def main(input_t1_path, sam_output_path, mni_t1_path, mni_parcellation_path, lut_path, dataset_name):
     warped_mask = register_images(mni_t1_path, mni_parcellation_path, input_t1_path)
     sam_output = nib.load(sam_output_path)
     sam_mask = sam_output.get_fdata()
     voxel_count_sam = np.sum(sam_mask > 0.5)
     volume = voxel_count_sam * np.prod(sam_output.header.get_zooms())
-    process_parcellation(warped_mask, sam_output_path, lut_path, volume)
+    process_parcellation(warped_mask, sam_output_path, lut_path, volume, dataset_name)
 
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 6:
-        print("Usage: parcellation_by_registration.py <input_t1_path> <sam_output_path> <mni_t1_path> <mni_parcellation_path> <lut_path>")
+    if len(sys.argv) != 7:
+        print("Usage: parcellation_by_registration.py <input_t1_path> <sam_output_path> <mni_t1_path> <mni_parcellation_path> <lut_path><dataset_name>")
     else:
-        main(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4],sys.argv[5])
+        main(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4],sys.argv[5], sys.argv[6])
