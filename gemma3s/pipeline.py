@@ -334,6 +334,7 @@ def process_patient(patient_entry: dict, config_data: dict, config_path: str,
                 "mid_idx": mid_index,
                 "tumor": has_tumor, # Lowercase key
                 "conf_score": float(confidence_score),
+                "reviewed_by_radio": False,  # New session or update needs radiologist review
                 "modality_processed": "flair",
                 "gemma_hard_coded_remark": gemma_remark,
                 "processed_timestamp": timestamp,
@@ -355,14 +356,9 @@ def process_patient(patient_entry: dict, config_data: dict, config_path: str,
             "mid_idx": mid_index,
             "tumor": has_tumor, # Lowercase key
             "conf_score": float(confidence_score),
+            "reviewed_by_radio": False,  # AI processing sets to False, requires radiologist review
             "modality_processed": "flair",
             "gemma_hard_coded_remark": gemma_remark,
-            # "reviewed_by_radio": False, # It was already false to get here. 
-            # Requirement: "Run ... and update comman_format.json in gemma_hard_coded_remark."
-            # It doesn't explicitly say set reviewed_by_radio to True, but usually pipeline implies doing the work.
-            # But per logic, if we leave it false, it picks it up again?
-            # Let's keep reviewed_by_radio as False or maybe we should set it to True aka 'Processed by AI'? 
-            # Actually 'reviewed_by_radio' likely means Radiologist. So AI processing leaves it False.
             "processed_timestamp": timestamp,
         })
         print(f"[UPDATE] Patient entry after update: mid_idx={patient_entry.get('mid_idx')}, tumor={patient_entry.get('tumor')}")

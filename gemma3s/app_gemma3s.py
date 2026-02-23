@@ -1219,8 +1219,8 @@ def run_parcellation_analysis(patient_id, session_id_selected, segmentation_path
         if parcellation_result:
             try:
                 import re
-                # Look for pattern like "X ml tumor extending" (supports int/float)
-                match = re.search(r'(\d+(?:\.\d+)?)\s*ml tumor extending', parcellation_result, re.IGNORECASE)
+                # Look for pattern like "Known tumor volume: approximately 204 ml" (supports int/float)
+                match = re.search(r'Known tumor volume:\s*approximately\s*(\d+(?:\.\d+)?)\s*ml', parcellation_result, re.IGNORECASE)
                 if match:
                     volume_ml = float(match.group(1))
                     print(f"[INFO] Parsed tumor volume: {volume_ml} ml")
@@ -1283,6 +1283,8 @@ def update_patient_results_json(patient_id, session_id_selected, parcellation_re
         session_key = session_id_selected.replace('_', '_')  # Keep original format
         if session_key not in patient_data:
             patient_data[session_key] = {}
+            # Initialize reviewed_by_radio for new session
+            patient_data[session_key]["reviewed_by_radio"] = False
             
         # Update with parcellation results
         patient_data[session_key]["manual report from SAM"] = parcellation_result
@@ -1396,10 +1398,37 @@ def update_patient_results_json_with_medgemma(patient_id, session_id_selected, c
         session_key = session_id_selected
         if session_key not in patient_data:
             patient_data[session_key] = {}
+            # Initialize reviewed_by_radio for new session
+            patient_data[session_key]["reviewed_by_radio"] = False
             
         # Update fields - store clinical and patient reports separately
         patient_data[session_key]["gemma radiology report"] = clinical_report
         patient_data[session_key]["gemma patient report"] = patient_report
+#         patient_data[session_key]["gemma radiology report"] = """FINDINGS:
+# Axial T1-weighted postcontrast MRI demonstrates a large, lobulated, heterogeneously enhancing mass centered in the left temporal lobe. The lesion extends from the left superior temporal gyrus through the left middle temporal gyrus and into the left inferior temporal gyrus. There is associated vasogenic edema within the left temporal lobe and left insula. The mass demonstrates heterogeneous enhancement with areas of nodular and diffuse enhancement. There is no significant mass effect on the adjacent lateral ventricle. The lesion abuts the left thalamus and left temporal horn of the lateral ventricle. The lesion is centered in the left temporal lobe.
+ 
+# IMPRESSION:
+# 1. Large, heterogeneously enhancing left temporal lobe mass with associated vasogenic edema.
+# 2. The lesion involves the left superior, middle, and inferior temporal gyri, extending into the left insula.
+# 3. The lesion is centered in the left temporal lobe.
+# 4. The lesion abuts the left thalamus and left temporal horn of the lateral ventricle.
+ 
+# TYPICAL NEXT STEPS:
+# Follow-up MRI is recommended to assess the response to treatment. Correlation with clinical findings and prior imaging studies is advised."""
+#         patient_data[session_key]["gemma patient report"] = """## What Was Seen on the MRI
+ 
+# The MRI scan showed a large mass in the left side of your brain, specifically in the area called the temporal lobe. This mass is described as being made of several rounded parts (lobulated) and it looks different in different areas (heterogeneously enhancing). It is located in the middle part of the brain, in the area behind your ear. The mass is connected to the surrounding brain tissue and has caused some swelling (edema) in that area and in the part of the brain next to it (the insula). The mass has different levels of brightness on the scan, indicating it's not uniform. It is close to the thalamus and the lateral ventricle (a fluid-filled space in the brain).
+ 
+# ## What This Means in General
+ 
+# This MRI finding suggests the presence of a significant brain tumor or abnormal growth in the left temporal lobe. The mass is large and has spread into nearby brain areas, causing some swelling.
+ 
+# ## Possible Implications
+ 
+# *   This finding indicates a brain tumor or abnormal growth.
+# *   The tumor is located in the left temporal lobe, which is involved in memory, hearing, and understanding language.
+# *   The tumor has caused swelling in the brain tissue around it.
+# *   Further tests and treatment options will be discussed with your doctor."""
 
         # Save updated data
         with open(patient_results_file, 'w') as f:
@@ -1445,6 +1474,32 @@ def update_comman_format_json_with_medgemma(patient_id, clinical_report, patient
             if entry.get("pid") == patient_id:
                 entry["gemma radiology report"] = clinical_report
                 entry["gemma patient report"] = patient_report
+#                 entry["gemma radiology report"] = """FINDINGS:
+# Axial T1-weighted postcontrast MRI demonstrates a large, lobulated, heterogeneously enhancing mass centered in the left temporal lobe. The lesion extends from the left superior temporal gyrus through the left middle temporal gyrus and into the left inferior temporal gyrus. There is associated vasogenic edema within the left temporal lobe and left insula. The mass demonstrates heterogeneous enhancement with areas of nodular and diffuse enhancement. There is no significant mass effect on the adjacent lateral ventricle. The lesion abuts the left thalamus and left temporal horn of the lateral ventricle. The lesion is centered in the left temporal lobe.
+ 
+# IMPRESSION:
+# 1. Large, heterogeneously enhancing left temporal lobe mass with associated vasogenic edema.
+# 2. The lesion involves the left superior, middle, and inferior temporal gyri, extending into the left insula.
+# 3. The lesion is centered in the left temporal lobe.
+# 4. The lesion abuts the left thalamus and left temporal horn of the lateral ventricle.
+ 
+# TYPICAL NEXT STEPS:
+# Follow-up MRI is recommended to assess the response to treatment. Correlation with clinical findings and prior imaging studies is advised."""
+#                 entry["gemma patient report"] = """## What Was Seen on the MRI
+ 
+# The MRI scan showed a large mass in the left side of your brain, specifically in the area called the temporal lobe. This mass is described as being made of several rounded parts (lobulated) and it looks different in different areas (heterogeneously enhancing). It is located in the middle part of the brain, in the area behind your ear. The mass is connected to the surrounding brain tissue and has caused some swelling (edema) in that area and in the part of the brain next to it (the insula). The mass has different levels of brightness on the scan, indicating it's not uniform. It is close to the thalamus and the lateral ventricle (a fluid-filled space in the brain).
+ 
+# ## What This Means in General
+ 
+# This MRI finding suggests the presence of a significant brain tumor or abnormal growth in the left temporal lobe. The mass is large and has spread into nearby brain areas, causing some swelling.
+ 
+# ## Possible Implications
+ 
+# *   This finding indicates a brain tumor or abnormal growth.
+# *   The tumor is located in the left temporal lobe, which is involved in memory, hearing, and understanding language.
+# *   The tumor has caused swelling in the brain tissue around it.
+# *   Further tests and treatment options will be discussed with your doctor."""
+
                 entry["reviewed_by_radio"] = True
                 updated = True
                 print(f"[INFO] Updated patient {patient_id} with both MedGemma reports in comman_format.json")
@@ -1528,9 +1583,12 @@ def update_radiologist_review(patient_id, session_id_selected, tumor_status, rev
         session_key = session_id_selected
         if session_key not in patient_data:
             patient_data[session_key] = {}
+            # Initialize reviewed_by_radio for new session
+            patient_data[session_key]["reviewed_by_radio"] = False
         
         patient_data[session_key]["tumor"] = tumor_status
-        patient_data[session_key]["reviewed_by_radiologist"] = reviewed_by_radio
+        patient_data[session_key]["reviewed_by_radio"] = reviewed_by_radio
+        patient_data[session_key]["reviewed_by_radiologist"] = reviewed_by_radio  # Keep both for compatibility
         patient_data[session_key]["radiologist_review_timestamp"] = timestamp
         
         with open(patient_results_file, 'w') as f:
@@ -2257,8 +2315,8 @@ def seg_track_app():
             return "*No patient selected.*", "*No report available.*", "*No report available.*"
         
         nifti_status_text = ""
-        clinical_report_text = "⏳ *Waiting for reports to populate in JSON...*"
-        patient_report_text = "⏳ *Waiting for reports to populate in JSON...*"
+        clinical_report_text = "⏳ *Medgemma is generating Clinical Report...Please Wait*"
+        patient_report_text = "⏳ *Medgemma is simplifying it for you...Please Wait*"
         
         # 1. Try to read from patient_results.json (session-specific, most detailed)
         try:
@@ -2668,6 +2726,10 @@ def seg_track_app():
                     "processed_timestamp": None  # Pipeline will update this
                 }
                 common_data.append(new_entry)
+            else:
+                # Existing patient - new session added, needs radiologist review
+                patient_entry["reviewed_by_radio"] = False
+                print(f"[INFO] New session added for existing patient {patient_id}, reset reviewed_by_radio to False")
              
             with open(common_format_path, 'w') as f:
                 json.dump(common_data, f, indent=4)
@@ -2686,6 +2748,8 @@ def seg_track_app():
                 lower = fname.lower()
                 if "flair" in lower or "t2f" in lower:
                     mods.append("flair")
+                elif "t1ce" in lower or ("t1" in lower and "ce" in lower):
+                    mods.append("t1ce")
                 elif "t1" in lower:
                     mods.append("t1")
                 elif "t2" in lower and "flair" not in lower:
@@ -2699,6 +2763,7 @@ def seg_track_app():
                 "mid_idx": None,  # Pipeline will update
                 "tumor": None,  # Pipeline will update
                 "conf_score": None,  # Pipeline will update
+                "reviewed_by_radio": False,  # New session needs radiologist review
                 "gemma_hard_coded_remark": "Pending Analysis",  # Pipeline will update
                 "modality_processed": None,  # Pipeline will update
                 "processed_timestamp": None  # Pipeline will update
@@ -3110,43 +3175,6 @@ def seg_track_app():
                 # Display currently selected scan info
                 current_scan_info = gr.Markdown("**No scan selected.** Please go to Patient Selection to choose a scan.")
                 
-                # Radiologist Review Panel
-                with gr.Accordion("🩺 Radiologist Review Panel", open=True) as review_panel:
-                    gr.Markdown(
-                        """**Review Instructions:**  
-                        1. Verify the AI's tumor prediction below
-                        2. Toggle tumor status if correction is needed
-                        3. Click 'Mark as Reviewed' to finalize your review
-                        """
-                    )
-                    
-                    with gr.Row():
-                        with gr.Column(scale=2):
-                            current_tumor_status_display = gr.Markdown(
-                                "**AI Prediction:** Not Available",
-                                elem_id="tumor_status_display"
-                            )
-                        with gr.Column(scale=1):
-                            tumor_status_toggle = gr.Checkbox(
-                                label="Tumor Present",
-                                value=False,
-                                interactive=True,
-                                info="Check if tumor is present, uncheck if no tumor"
-                            )
-                    
-                    with gr.Row():
-                        mark_reviewed_btn = gr.Button(
-                            "✅ Mark as Reviewed by Radiologist",
-                            variant="primary",
-                            scale=2
-                        )
-                        review_status_display = gr.Textbox(
-                            label="Review Status",
-                            interactive=False,
-                            lines=2,
-                            scale=3
-                        )
-                
                 gr.Markdown(
                     '''
                     <div style="text-align:left; margin-bottom:20px;">
@@ -3257,16 +3285,42 @@ def seg_track_app():
                         output_mp4 = gr.File(label="Predicted video")
                         output_mask = gr.File(label="Predicted masks")
 
-
-                gr.Markdown(
-                    '''
-                    <div style="text-align:center; margin-top: 20px;">
-                        The authors of this work highly appreciate Meta AI for making SAM2 publicly available to the community. 
-                        The interface was built on <a href="https://github.com/z-x-yang/Segment-and-Track-Anything/blob/main/tutorial/tutorial%20for%20WebUI-1.0-Version.md" target="_blank">SegTracker</a>, which is also an amazing tool for video segmentation tracking. 
-                        <a href="https://docs.google.com/document/d/1idDBV0faOjdjVs-iAHr0uSrw_9_ZzLGrUI2FEdK-lso/edit?usp=sharing" target="_blank">Data source</a>
-                    </div>
-                        '''
-                )
+                        # Radiologist Review Panel
+                        with gr.Accordion("🩺 Radiologist Review Panel", open=True) as review_panel:
+                            gr.Markdown(
+                                """**Review Instructions:**  
+                                1. Verify the AI's tumor prediction below
+                                2. Toggle tumor status if correction is needed
+                                3. Click 'Mark as Reviewed' to finalize your review
+                                """
+                            )
+                            
+                            with gr.Row():
+                                with gr.Column(scale=2):
+                                    current_tumor_status_display = gr.Markdown(
+                                        "**AI Prediction:** Not Available",
+                                        elem_id="tumor_status_display"
+                                    )
+                                with gr.Column(scale=1):
+                                    tumor_status_toggle = gr.Checkbox(
+                                        label="Tumor Present",
+                                        value=False,
+                                        interactive=True,
+                                        info="Check if tumor is present, uncheck if no tumor"
+                                    )
+                            
+                            with gr.Row():
+                                mark_reviewed_btn = gr.Button(
+                                    "✅ Mark as Reviewed by Radiologist",
+                                    variant="primary",
+                                    scale=2
+                                )
+                                review_status_display = gr.Textbox(
+                                    label="Review Status",
+                                    interactive=False,
+                                    lines=2,
+                                    scale=3
+                                )
 
             # ==================== ANALYSIS & REPORTING TAB ====================
             with gr.Tab("📊 Analysis & Reporting", id=2) as analysis_tab:
