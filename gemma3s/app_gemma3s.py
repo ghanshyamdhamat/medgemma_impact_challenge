@@ -4030,6 +4030,7 @@ def seg_track_app():
                     clinical_report, patient_report, clinical_docx_path, patient_docx_path = generate_medgemma_reports(
                         patient_id, session_id_selected, scan_name, segmentation_path, parcellation_result
                     )
+
                 except Exception as gen_error:
                     print(f"[AUTO-CHAIN ERROR] generate_medgemma_reports failed: {gen_error}")
                     traceback.print_exc()
