@@ -1467,6 +1467,93 @@ def update_comman_format_json_with_medgemma(patient_id, clinical_report, patient
         return False
 
 
+def update_radiologist_review(patient_id, session_id_selected, tumor_status, reviewed_by_radio):
+    """Update patient records with radiologist's review decision.
+    
+    Updates both comman_format.json and patient_results.json with:
+    - Tumor status (True/False) as determined by radiologist
+    - Reviewed by radiologist flag (True)
+    - Timestamp of review
+    
+    Args:
+        patient_id: Patient ID
+        session_id_selected: Session ID
+        tumor_status: Boolean - True if radiologist confirms tumor, False if no tumor
+        reviewed_by_radio: Boolean - Should be True when radiologist reviews
+    
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    try:
+        import json
+        import datetime
+        
+        timestamp = str(np.datetime64("now"))
+        
+        # Update comman_format.json
+        common_format_file = join(COMMON_DATA_PATH, "comman_format.json")
+        if exists(common_format_file):
+            with open(common_format_file, 'r') as f:
+                data = json.load(f)
+            
+            updated = False
+            for entry in data:
+                if entry.get("pid") == patient_id:
+                    entry["tumor"] = tumor_status
+                    entry["reviewed_by_radio"] = reviewed_by_radio
+                    entry["radiologist_review_timestamp"] = timestamp
+                    updated = True
+                    print(f"[INFO] Updated comman_format.json: {patient_id} - tumor={tumor_status}, reviewed={reviewed_by_radio}")
+                    break
+            
+            if updated:
+                with open(common_format_file, 'w') as f:
+                    json.dump(data, f, indent=4)
+            else:
+                return False, f"Patient {patient_id} not found in comman_format.json"
+        else:
+            return False, "comman_format.json not found"
+        
+        # Update patient_results.json
+        patient_folder = join(COMMON_DATA_PATH, patient_id)
+        patient_results_file = join(patient_folder, "patient_results.json")
+        
+        if exists(patient_results_file):
+            with open(patient_results_file, 'r') as f:
+                patient_data = json.load(f)
+        else:
+            patient_data = {}
+        
+        # Update session data
+        session_key = session_id_selected
+        if session_key not in patient_data:
+            patient_data[session_key] = {}
+        
+        patient_data[session_key]["tumor"] = tumor_status
+        patient_data[session_key]["reviewed_by_radiologist"] = reviewed_by_radio
+        patient_data[session_key]["radiologist_review_timestamp"] = timestamp
+        
+        with open(patient_results_file, 'w') as f:
+            json.dump(patient_data, f, indent=4)
+        
+        print(f"[INFO] Updated patient_results.json: {patient_id}/{session_id_selected} - tumor={tumor_status}, reviewed={reviewed_by_radio}")
+        
+        status_msg = f"✅ Review saved successfully!\n"
+        status_msg += f"Patient: {patient_id}\n"
+        status_msg += f"Session: {session_id_selected}\n"
+        status_msg += f"Tumor Status: {'Positive' if tumor_status else 'Negative'}\n"
+        status_msg += f"Reviewed by Radiologist: {'Yes' if reviewed_by_radio else 'No'}\n"
+        status_msg += f"Timestamp: {timestamp}"
+        
+        return True, status_msg
+        
+    except Exception as e:
+        import traceback
+        error_msg = f"❌ Error updating radiologist review: {str(e)}\n{traceback.format_exc()}"
+        print(f"[ERROR] {error_msg}")
+        return False, error_msg
+
+
 def generate_medgemma_reports(patient_id, session_id_selected, scan_name, segmentation_path, parcellation_result=None):
     """Generate clinical and patient-friendly reports using MedGemma.
     
@@ -3023,6 +3110,43 @@ def seg_track_app():
                 # Display currently selected scan info
                 current_scan_info = gr.Markdown("**No scan selected.** Please go to Patient Selection to choose a scan.")
                 
+                # Radiologist Review Panel
+                with gr.Accordion("🩺 Radiologist Review Panel", open=True) as review_panel:
+                    gr.Markdown(
+                        """**Review Instructions:**  
+                        1. Verify the AI's tumor prediction below
+                        2. Toggle tumor status if correction is needed
+                        3. Click 'Mark as Reviewed' to finalize your review
+                        """
+                    )
+                    
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            current_tumor_status_display = gr.Markdown(
+                                "**AI Prediction:** Not Available",
+                                elem_id="tumor_status_display"
+                            )
+                        with gr.Column(scale=1):
+                            tumor_status_toggle = gr.Checkbox(
+                                label="Tumor Present",
+                                value=False,
+                                interactive=True,
+                                info="Check if tumor is present, uncheck if no tumor"
+                            )
+                    
+                    with gr.Row():
+                        mark_reviewed_btn = gr.Button(
+                            "✅ Mark as Reviewed by Radiologist",
+                            variant="primary",
+                            scale=2
+                        )
+                        review_status_display = gr.Textbox(
+                            label="Review Status",
+                            interactive=False,
+                            lines=2,
+                            scale=3
+                        )
+                
                 gr.Markdown(
                     '''
                     <div style="text-align:left; margin-bottom:20px;">
@@ -3279,16 +3403,16 @@ def seg_track_app():
                 Updates for navigation to segmentation tab with loaded patient scan
             """
             if not selected_value or not patient_data_list:
-                return gr.skip(), "❌ Please select a patient from the dropdown first.", {}
+                return gr.skip(), "❌ Please select a patient from the dropdown first.", {}, "", False, ""
             
             # Extract row index from dropdown value (format: "1. patient_id - ...")
             try:
                 row_num = int(selected_value.split('.')[0].strip()) - 1  # Convert to 0-based index
             except (ValueError, IndexError):
-                return gr.skip(), "❌ Error: Could not parse patient selection", {}
+                return gr.skip(), "❌ Error: Could not parse patient selection", {}, "", False, ""
             
             if row_num < 0 or row_num >= len(patient_data_list):
-                return gr.skip(), "❌ Error: Patient index out of range", {}
+                return gr.skip(), "❌ Error: Patient index out of range", {}, "", False, ""
             
             patient = patient_data_list[row_num]
             patient_id = patient['patient_id']
@@ -3298,14 +3422,14 @@ def seg_track_app():
             # Get most recent session
             session_id = get_most_recent_session(patient_id)
             if not session_id:
-                return gr.skip(), f"❌ Error: No sessions found for patient {patient_id}", {}
+                return gr.skip(), f"❌ Error: No sessions found for patient {patient_id}", {}, "", False, ""
             
             print(f"[DEBUG] Most recent session: {session_id}")
             
             # Find FLAIR scan
             scan_name = find_flair_scan(patient_id, session_id)
             if not scan_name:
-                return gr.skip(), f"❌ Error: No FLAIR scan found for patient {patient_id}, session {session_id}", {}
+                return gr.skip(), f"❌ Error: No FLAIR scan found for patient {patient_id}, session {session_id}", {}, "", False, ""
             
             print(f"[DEBUG] Found FLAIR scan: {scan_name}")
             
@@ -3313,7 +3437,7 @@ def seg_track_app():
             scan_path = get_scan_full_path(patient_id, session_id, scan_name)
             
             if not exists(scan_path):
-                return gr.skip(), f"❌ Error: Scan file not found at {scan_path}", {}
+                return gr.skip(), f"❌ Error: Scan file not found at {scan_path}", {}, "", False, ""
             
             # Create patient info dict
             patient_info = {
@@ -3326,23 +3450,34 @@ def seg_track_app():
             slice_id = get_slice_id_for_patient_session(patient_id, session_id)
             slice_id_display = str(slice_id) if slice_id is not None else "N/A"
             
+            # Get tumor status and reviewed status
+            tumor_status = patient.get('tumor', False)
+            reviewed_status = patient.get('reviewed_by_radio', False)
+            conf_score = patient.get('conf_score', 0.0)
+            
             # Create info text
             info_text = f"""### 📊 Current Scan Information
 **Patient ID:** {patient_id}  
 **Session:** {session_id}  
 **Scan:** {scan_name}  
 **Slice ID (from JSON):** {slice_id_display}  
-**Tumor Status:** {'Tumor Present' if patient.get('tumor', False) else 'Normal'}  
-**Confidence Score:** {patient.get('conf_score', 0.0):.2f}  
-**Reviewed by Radiologist:** {'Yes' if patient.get('reviewed_by_radio', False) else 'No'}  
+**Tumor Status:** {'Tumor Present' if tumor_status else 'Normal'}  
+**Confidence Score:** {conf_score:.2f}  
+**Reviewed by Radiologist:** {'Yes' if reviewed_status else 'No'}  
 
 **Full Path:** `{scan_path}`
 """
             
+            # Prepare tumor status display for radiologist review panel
+            tumor_display = f"""**AI Prediction:** {'🔴 Tumor Detected' if tumor_status else '🟢 No Tumor'} (Confidence: {conf_score:.2f})  
+**Reviewed:** {'✅ Yes' if reviewed_status else '⏳ Not Yet'}"""
+            
+            review_status_msg = f"Patient {patient_id} loaded. Review and update status as needed."
+            
             print(f"[DEBUG] Patient selection successful. Navigating to segmentation tab.")
             
-            # Return: navigate to segmentation tab (tab 1), update scan info, store patient info
-            return gr.Tabs(selected=1), info_text, patient_info
+            # Return: navigate to segmentation tab (tab 1), update scan info, store patient info, tumor display, toggle value, review status
+            return gr.Tabs(selected=1), info_text, patient_info, tumor_display, tumor_status, review_status_msg
         
 
         
@@ -3439,12 +3574,12 @@ def seg_track_app():
             3. Preprocess Video (Load Config/Checkpoint)
             """
             # 1. Select Patient
-            tabs_update, info_text, patient_info = handle_patient_selection_from_dropdown(selected_value, patient_data_list)
+            tabs_update, info_text, patient_info, tumor_display, tumor_toggle_val, review_status = handle_patient_selection_from_dropdown(selected_value, patient_data_list)
             
             # Default empty returns for pipeline failure
             empty_meta = (
                 None, None, gr.Slider(), 
-                {"minimum": 0.0, "maximum": 100, "step": 0.01, "value": 0.0}, 
+                {"minimum": 0.0, "maximum": 100, "step": 0.01, "value": 0.01}, 
                 None, None, None, 0, 0, gr.Slider(), 0, ""
             )
             
@@ -3454,7 +3589,8 @@ def seg_track_app():
                     tabs_update, info_text, patient_info, 
                     False,  # skip_video_change
                     gr.Video(value=None),
-                    *empty_meta
+                    *empty_meta,
+                    tumor_display, tumor_toggle_val, review_status  # Add review panel outputs
                 )
 
             # Extract correct session_id from the new patient info
@@ -3471,7 +3607,8 @@ def seg_track_app():
                     tabs_update, info_text + "\n\n❌ **Error:** Failed to convert NIfTI to video.", patient_info, 
                     False,  # skip_video_change
                     video_update,
-                    *empty_meta
+                    *empty_meta,
+                    tumor_display, tumor_toggle_val, review_status  # Add review panel outputs
                 )
 
             # 3. Preprocess Video
@@ -3510,11 +3647,46 @@ def seg_track_app():
                 tabs_update, info_text, patient_info, 
                 True,   # skip_video_change - prevent input_video.change from resetting
                 video_update,
-                *meta_results
+                *meta_results,
+                tumor_display, tumor_toggle_val, review_status  # Add review panel outputs
             )
 
         # Connect patient selection events
         refresh_table_btn.click(
+            fn=load_patient_summary_table,
+            inputs=[],
+            outputs=[patient_summary_table, patient_data_state, patient_selection_dropdown]
+        )
+        
+        # Radiologist Review Handler
+        def handle_radiologist_review(patient_info, tumor_toggle_value):
+            """Handle radiologist review submission."""
+            if not patient_info or not isinstance(patient_info, dict):
+                return "❌ Error: No patient loaded. Please select a patient first."
+            
+            patient_id = patient_info.get('patient_id')
+            session_id = patient_info.get('session_id')
+            
+            if not patient_id or not session_id:
+                return "❌ Error: Invalid patient data."
+            
+            # Call the update function
+            success, message = update_radiologist_review(
+                patient_id=patient_id,
+                session_id_selected=session_id,
+                tumor_status=tumor_toggle_value,
+                reviewed_by_radio=True
+            )
+            
+            return message
+        
+        # Connect radiologist review button
+        mark_reviewed_btn.click(
+            fn=handle_radiologist_review,
+            inputs=[selected_patient_info, tumor_status_toggle],
+            outputs=[review_status_display]
+        ).then(
+            # Refresh the patient table to show updated status
             fn=load_patient_summary_table,
             inputs=[],
             outputs=[patient_summary_table, patient_data_state, patient_selection_dropdown]
@@ -3531,7 +3703,9 @@ def seg_track_app():
                 skip_video_change,  # Flag to prevent input_video.change from resetting
                 input_video, # Step 2
                 # Step 3 (Meta results)
-                input_first_frame, drawing_board, frame_per, slider_state, output_video, output_mp4, output_mask, ann_obj_id, max_obj_id, obj_id_slider, frame_num, current_frame_display
+                input_first_frame, drawing_board, frame_per, slider_state, output_video, output_mp4, output_mask, ann_obj_id, max_obj_id, obj_id_slider, frame_num, current_frame_display,
+                # Radiologist review panel outputs
+                current_tumor_status_display, tumor_status_toggle, review_status_display
             ]
         ).then(
             fn=load_existing_reports,
