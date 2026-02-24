@@ -64,11 +64,18 @@ for resolver_name, resolver_func in [
 user_processes = {}
 PROCESS_TIMEOUT = datetime.timedelta(minutes=15)
 
-# Path to common_data directory containing patient folders
-COMMON_DATA_PATH = "/mnt/bb586fde-943d-4653-af27-224147bfba7e/Medgemma/MedSAM2/common_data"
+# Project root (one level up from this file)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
-# Gradio temp directory for file downloads (Gradio can always serve from here)
-GRADIO_TEMP_DIR = "/tmp/gradio_downloads"
+# Path to common_data directory containing patient folders (relative to project)
+COMMON_DATA_PATH = os.path.join(PROJECT_ROOT, "common_data")
+
+# Project-local tmp directory for temporary files (project-relative instead of /tmp)
+PROJECT_TMP_DIR = os.path.join(PROJECT_ROOT, "tmp")
+os.makedirs(PROJECT_TMP_DIR, exist_ok=True)
+
+# Gradio temp directory for file downloads (project-local tmp)
+GRADIO_TEMP_DIR = os.path.join(PROJECT_TMP_DIR, "gradio_downloads")
 os.makedirs(GRADIO_TEMP_DIR, exist_ok=True)
 
 
@@ -441,17 +448,15 @@ def nifti_to_video(patient_id, session_id, scan_name):
         # Clamp to valid range
         target_slice_idx = max(0, min(target_slice_idx, total_slices - 1))
 
-    os.makedirs("/tmp/nifti_videos", exist_ok=True)
+    nifti_videos_dir = os.path.join(PROJECT_TMP_DIR, "nifti_videos")
+    os.makedirs(nifti_videos_dir, exist_ok=True)
     base = scan_name
     if base.endswith(".nii.gz"):
         base = base[:-7]
     elif base.endswith(".nii"):
         base = base[:-4]
 
-    video_path = os.path.join(
-        "/tmp/nifti_videos", 
-        f"{patient_id}_{session_id}_{base}.mp4"
-    )
+    video_path = os.path.join(nifti_videos_dir, f"{patient_id}_{session_id}_{base}.mp4")
 
     # Process slices to frames
     frames = []
@@ -507,7 +512,7 @@ def load_patient_summary_data():
     Returns:
         list: List of patient dictionaries with summary information
     """
-    sample_data_path = "/mnt/bb586fde-943d-4653-af27-224147bfba7e/Medgemma/MedSAM2/common_data"
+    sample_data_path = COMMON_DATA_PATH
     common_format_file = join(sample_data_path, "comman_format.json")
     
     if not exists(common_format_file):
@@ -700,9 +705,9 @@ def extract_video_info(input_video):
     return fps, total_frames, None, None, None, None, None
 
 def get_meta_from_video(session_id, input_video, scale_slider, config_path, checkpoint_path, target_slice=None):
-    output_dir = f'/tmp/output_frames/{session_id}'
-    output_masks_dir = f'/tmp/output_masks/{session_id}'
-    output_combined_dir = f'/tmp/output_combined/{session_id}'
+    output_dir = os.path.join(PROJECT_TMP_DIR, 'output_frames', session_id)
+    output_masks_dir = os.path.join(PROJECT_TMP_DIR, 'output_masks', session_id)
+    output_combined_dir = os.path.join(PROJECT_TMP_DIR, 'output_combined', session_id)
     clear_folder(output_dir)
     clear_folder(output_masks_dir)
     clear_folder(output_combined_dir)
@@ -781,7 +786,7 @@ def mask2bbox(mask):
 
 def sam_stroke(session_id, seg_tracker, drawing_board, last_draw, frame_num, ann_obj_id):
     predictor, inference_state, image_predictor = seg_tracker
-    image_path = f'/tmp/output_frames/{session_id}/{frame_num:07d}.jpg'
+    image_path = os.path.join(PROJECT_TMP_DIR, 'output_frames', session_id, f'{frame_num:07d}.jpg')
     print(f"[DEBUG] sam_stroke: frame_num={frame_num}, loading image from {image_path}")
     image = cv2.imread(image_path)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -888,7 +893,7 @@ def sam_click(session_id, seg_tracker, frame_num, point_mode, click_stack, ann_o
         labels=labels_dict[ann_frame_idx][ann_obj_id],
     )
 
-    image_path = f'/tmp/output_frames/{session_id}/{ann_frame_idx:07d}.jpg'
+    image_path = os.path.join(PROJECT_TMP_DIR, 'output_frames', session_id, f'{ann_frame_idx:07d}.jpg')
     image = cv2.imread(image_path)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
@@ -950,8 +955,8 @@ def show_mask(mask, image=None, obj_id=None):
     return mask_image
 
 def show_res_by_slider(session_id, frame_per, click_stack):
-    image_path = f'/tmp/output_frames/{session_id}'
-    output_combined_dir = f'/tmp/output_combined/{session_id}'
+    image_path = os.path.join(PROJECT_TMP_DIR, 'output_frames', session_id)
+    output_combined_dir = os.path.join(PROJECT_TMP_DIR, 'output_combined', session_id)
     
     # Check if directories exist before listing
     combined_frames = []
@@ -1009,8 +1014,8 @@ def convert_masks_to_nifti(session_id, original_nifti_path, obj_id=0, patient_id
     Returns:
         tuple: (output_nifti_path, volume_ml, voxel_count, report_path, patient_seg_path)
     """
-    output_masks_dir = f'/tmp/output_masks/{session_id}'
-    output_files_dir = f'/tmp/output_files/{session_id}'
+    output_masks_dir = os.path.join(PROJECT_TMP_DIR, 'output_masks', session_id)
+    output_files_dir = os.path.join(PROJECT_TMP_DIR, 'output_files', session_id)
     
     if not os.path.exists(output_masks_dir):
         raise FileNotFoundError(f"No masks found for session {session_id}")
@@ -1126,13 +1131,14 @@ def convert_masks_to_nifti(session_id, original_nifti_path, obj_id=0, patient_id
     
     return output_nifti_path, volume_ml, voxel_count, report_path, patient_seg_path
 
-def run_parcellation_analysis(patient_id, session_id_selected, segmentation_path):
+def run_parcellation_analysis(patient_id, session_id_selected, segmentation_path, dataset_type='Non-Brats'):
     """Run parcellation analysis using parcellation_by_registration.py.
     
     Args:
         patient_id: Patient ID
         session_id_selected: Session ID
         segmentation_path: Path to segmentation NIfTI file
+        dataset_type: 'Brats' or 'Non-Brats' (default: 'Non-Brats')
     
     Returns:
         tuple: (parcellation_result_string, parcellation_output_path) or (None, None) if error
@@ -1171,11 +1177,11 @@ def run_parcellation_analysis(patient_id, session_id_selected, segmentation_path
         
         print(f"[INFO] Using scan for parcellation: {t1_scan}")
         
-        # Set up paths for parcellation script
-        parcellation_script = "/mnt/bb586fde-943d-4653-af27-224147bfba7e/Medgemma/MedSAM2/parcellations/parcellation_by_registration.py"
-        mni_t1_path = "/mnt/bb586fde-943d-4653-af27-224147bfba7e/Medgemma/MedSAM2/parcellations/MNI152_T1_1mm_Brain.nii.gz"
-        mni_parcellation_path = "/mnt/bb586fde-943d-4653-af27-224147bfba7e/Medgemma/MedSAM2/parcellations/aparc.DKTatlas+aseg.deep.mgz"
-        lut_path = "/mnt/bb586fde-943d-4653-af27-224147bfba7e/Medgemma/MedSAM2/parcellations/FreeSurferColorLUT.txt"
+        # Set up paths for parcellation script (project-relative)
+        parcellation_script = os.path.join(PROJECT_ROOT, "parcellations", "parcellation_by_registration.py")
+        mni_t1_path = os.path.join(PROJECT_ROOT, "parcellations", "MNI152_T1_1mm_Brain.nii.gz")
+        mni_parcellation_path = os.path.join(PROJECT_ROOT, "parcellations", "aparc.DKTatlas+aseg.deep.mgz")
+        lut_path = os.path.join(PROJECT_ROOT, "parcellations", "FreeSurferColorLUT.txt")
         
         if not exists(parcellation_script):
             print(f"[ERROR] Parcellation script not found: {parcellation_script}")
@@ -1191,7 +1197,7 @@ def run_parcellation_analysis(patient_id, session_id_selected, segmentation_path
             mni_t1_path,
             mni_parcellation_path,
             lut_path,
-            'Brats'
+            dataset_type  # Use the dataset_type parameter instead of hardcoded 'Brats'
         ]
         
         print(f"[INFO] Running parcellation: {' '.join(cmd)}")
@@ -1694,12 +1700,12 @@ def generate_medgemma_reports(patient_id, session_id_selected, scan_name, segmen
         return None, None, None, None
 
 def tracking_objects(session_id, seg_tracker, frame_num, input_video):
-    output_dir = f'/tmp/output_frames/{session_id}'
-    output_masks_dir = f'/tmp/output_masks/{session_id}'
-    output_combined_dir = f'/tmp/output_combined/{session_id}'
-    output_files_dir = f'/tmp/output_files/{session_id}'
-    output_video_path = f'{output_files_dir}/output_video.mp4'
-    output_zip_path = f'{output_files_dir}/output_masks.zip'
+    output_dir = os.path.join(PROJECT_TMP_DIR, 'output_frames', session_id)
+    output_masks_dir = os.path.join(PROJECT_TMP_DIR, 'output_masks', session_id)
+    output_combined_dir = os.path.join(PROJECT_TMP_DIR, 'output_combined', session_id)
+    output_files_dir = os.path.join(PROJECT_TMP_DIR, 'output_files', session_id)
+    output_video_path = os.path.join(output_files_dir, 'output_video.mp4')
+    output_zip_path = os.path.join(output_files_dir, 'output_masks.zip')
     clear_folder(output_masks_dir)
     clear_folder(output_combined_dir)
     clear_folder(output_files_dir)
@@ -2107,7 +2113,7 @@ def seg_track_app():
             slider_max = slider_state.get("maximum", 1)
             if slider_max > 0 and frame_per_val > 0:
                 # Estimate total frames from output_frames directory
-                output_dir = f'/tmp/output_frames/{session_id}'
+                output_dir = os.path.join(PROJECT_TMP_DIR, 'output_frames', session_id)
                 if os.path.exists(output_dir):
                     frame_files = [f for f in os.listdir(output_dir) if f.endswith('.jpg')]
                     total_frames_num = len(frame_files)
@@ -2138,7 +2144,7 @@ def seg_track_app():
         if frame_num == 0 and slider_state and frame_per_val is not None:
             slider_max = slider_state.get("maximum", 1)
             if slider_max > 0 and frame_per_val > 0:
-                output_dir = f'/tmp/output_frames/{session_id}'
+                output_dir = os.path.join(PROJECT_TMP_DIR, 'output_frames', session_id)
                 if os.path.exists(output_dir):
                     frame_files = [f for f in os.listdir(output_dir) if f.endswith('.jpg')]
                     total_frames_num = len(frame_files)
@@ -2184,7 +2190,7 @@ def seg_track_app():
             elif cand_yx_ok and not cand_xy_ok:
                 x, y = idx1, idx0
 
-        image_path = f'/tmp/output_frames/{session_id}/{frame_num:07d}.jpg'
+        image_path = os.path.join(PROJECT_TMP_DIR, 'output_frames', session_id, f'{frame_num:07d}.jpg')
         frame_img = cv2.imread(image_path)
         if frame_img is not None:
             frame_h, frame_w = frame_img.shape[:2]
@@ -2469,7 +2475,23 @@ def seg_track_app():
                 if patient_seg_path and os.path.exists(patient_seg_path):
                     status_msg += "---\n\n"
                     status_msg += "🔄 **Running parcellation analysis...**\n\n"
-                    parcellation_result, parcellation_path, parcellation_volume_ml = run_parcellation_analysis(patient_id, session_id_selected, patient_seg_path)
+                    
+                    # Retrieve dataset type from patient data
+                    dataset_type = 'Non-Brats'  # default
+                    try:
+                        patient_folder = join(COMMON_DATA_PATH, patient_id)
+                        patient_results_file = join(patient_folder, "patient_results.json")
+                        if exists(patient_results_file):
+                            with open(patient_results_file, 'r') as f:
+                                patient_data = json.load(f)
+                            session_data = patient_data.get(session_id_selected, {})
+                            is_brats = session_data.get('is_brats_dataset', False)
+                            dataset_type = 'Brats' if is_brats else 'Non-Brats'
+                            print(f"[INFO] Retrieved dataset type: {dataset_type} (is_brats={is_brats})")
+                    except Exception as e:
+                        print(f"[WARNING] Could not retrieve dataset type, using default: {e}")
+                    
+                    parcellation_result, parcellation_path, parcellation_volume_ml = run_parcellation_analysis(patient_id, session_id_selected, patient_seg_path, dataset_type)
                     final_volume_ml = parcellation_volume_ml if parcellation_volume_ml is not None else segmentation_volume_ml
 
                     if parcellation_result:
@@ -2647,7 +2669,7 @@ def seg_track_app():
             print(f"[ERROR] Failed to run pipeline: {e}")
             return False, f"Pipeline Exception: {str(e)}"
 
-    def handle_scan_upload(patient_mode, new_pid_val, existing_pid_val, uploaded_files):
+    def handle_scan_upload(patient_mode, new_pid_val, existing_pid_val, uploaded_files, is_brats_dataset=False):
         """Handle MRI scan upload, create folder structure, and trigger automated analysis pipeline."""
         if not uploaded_files:
             return "❌ Error: No file uploaded.", gr.update(), gr.update()
@@ -2723,12 +2745,14 @@ def seg_track_app():
                     "gemma_hard_coded_remark": "Pending Analysis",  # Pipeline will update this
                     "modality_processed": None,  # Pipeline will update this
                     "created_timestamp": str(datetime.datetime.now()),
-                    "processed_timestamp": None  # Pipeline will update this
+                    "processed_timestamp": None,  # Pipeline will update this
+                    "is_brats_dataset": is_brats_dataset  # Store dataset type
                 }
                 common_data.append(new_entry)
             else:
                 # Existing patient - new session added, needs radiologist review
                 patient_entry["reviewed_by_radio"] = False
+                patient_entry["is_brats_dataset"] = is_brats_dataset  # Update dataset type
                 print(f"[INFO] New session added for existing patient {patient_id}, reset reviewed_by_radio to False")
              
             with open(common_format_path, 'w') as f:
@@ -2766,7 +2790,8 @@ def seg_track_app():
                 "reviewed_by_radio": False,  # New session needs radiologist review
                 "gemma_hard_coded_remark": "Pending Analysis",  # Pipeline will update
                 "modality_processed": None,  # Pipeline will update
-                "processed_timestamp": None  # Pipeline will update
+                "processed_timestamp": None,  # Pipeline will update
+                "is_brats_dataset": is_brats_dataset  # Store dataset type
             }
         
             with open(results_path, 'w') as f:
@@ -3046,6 +3071,9 @@ def seg_track_app():
                 ### 📤 Upload MRI Scans
                 Add scans for a new patient or append a new session to an existing patient.
                 The analysis pipeline will run automatically upon upload.
+                
+                ⚠️ **Important Note about BRATS Dataset:** The BRATS dataset has a known mirroring issue where images may be flipped along certain axes. 
+                If you're uploading BRATS data, please enable the "BRATS Dataset" toggle below to apply appropriate corrections during parcellation analysis.
                 """)
                 
                 with gr.Row():
@@ -3077,6 +3105,13 @@ def seg_track_app():
                         mri_file_upload = gr.File(
                             label="Upload MRI Scan (NIfTI)", 
                             file_count="multiple",
+                            interactive=True
+                        )
+                        
+                        brats_dataset_toggle = gr.Checkbox(
+                            label="BRATS Dataset (enables mirroring corrections)",
+                            value=False,
+                            info="Check this if uploading BRATS data to handle known mirroring issues",
                             interactive=True
                         )
                         
@@ -3554,7 +3589,7 @@ def seg_track_app():
         
         upload_btn.click(
             fn=handle_scan_upload,
-            inputs=[patient_mode, new_patient_id, existing_patient_dropdown, mri_file_upload],
+            inputs=[patient_mode, new_patient_id, existing_patient_dropdown, mri_file_upload, brats_dataset_toggle],
             outputs=[upload_status, new_patient_id, existing_patient_dropdown]
         ).then(
             # Refresh patient overview table after upload

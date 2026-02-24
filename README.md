@@ -63,7 +63,7 @@
 ## Project Structure
 ```
 gemma3s/
-├── app_medgemma_new_gradio.py  # Main Gradio application
+├── app_gemma3s.py              # Main Gradio application
 ├── simplify_report.py           # MedGemma report generation module
 ├── pipeline.py                  # Automated analysis pipeline
 ├── folder_watcher.py            # File system monitoring for auto-processing
@@ -93,41 +93,64 @@ sam2/                           # SAM2 model implementation
 ## Installation
 
 ### Prerequisites
-```bash
-# Install CUDA toolkit (if not already installed)
-# Visit: https://developer.nvidia.com/cuda-downloads
-# Install Python dependencies
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-```
+- **GPU**: NVIDIA GPU with CUDA support (recommended: 16GB+ VRAM)
+- **RAM**: 32GB+ recommended
+- **OS**: Linux (tested on Ubuntu)
+- **Python**: 3.12 (recommended)
 
-### Setup
-```bash
-# Clone the repository
-git clone <repository-url>
-cd MedSAM2/gemma3s
+### Setup Steps
 
-# Install dependencies
-pip install -r requirements.txt
+1. **Create Virtual Environment**
+   ```bash
+   conda create -n medsam2 python=3.12 -y
+   conda activate medsam2
+   ```
 
-# Set up environment variables
-export HF_TOKEN="your_huggingface_token"  # Required for MedGemma
-export GRADIO_SERVER_PORT=18863           # Optional: custom port
+2. **Install PyTorch**
+   ```bash
+   pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
+   ```
 
-# Download model checkpoints (if not included)
-# Place checkpoint files in ../checkpoints/ directory
-```
+3. **Clone and Install MedSAM2**
+   ```bash
+   git clone https://github.com/bowang-lab/MedSAM2.git
+   cd MedSAM2
+   pip install -e ".[dev]"
+   ```
+
+4. **Download Checkpoints**
+   ```bash
+   bash download.sh
+   ```
+
+5. **Install Additional Dependencies**
+   ```bash
+   # System dependencies
+   sudo apt-get update
+   sudo apt-get install ffmpeg
+   
+   # Python packages
+   pip install -r requirements.txt
+   ```
 
 ### Configuration
 The application automatically detects available checkpoints and configs. Ensure:
-1. Model checkpoints are in `../checkpoints/` directory
-2. SAM2 configs are in `../sam2/configs/` directory
+1. Model checkpoints are in `checkpoints/` directory
+2. SAM2 configs are in `sam2/configs/` directory
 3. `common_data/` directory exists for patient data storage
+
+### Environment Variables
+```bash
+export HF_TOKEN="your_huggingface_token"  # Required for MedGemma
+export GRADIO_SERVER_PORT=18863           # Optional: custom port
+```
 
 ## Quick Start
 
 ### Launch the Application
 ```bash
-python app_medgemma_new_gradio.py
+cd gemma3s
+python app_gemma3s.py
 ```
 The application will start on `http://0.0.0.0:18863` (or your configured port).
 

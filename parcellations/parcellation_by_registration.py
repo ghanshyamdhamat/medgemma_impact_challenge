@@ -2,6 +2,7 @@ import numpy as np
 import nibabel as nib
 import ants
 import sys
+import re
 
 def process_parcellation(parcellation, segmentation_path, lut_path, volume, dataset_name="Brats"):
     lobe_map = {
@@ -51,8 +52,32 @@ def process_parcellation(parcellation, segmentation_path, lut_path, volume, data
     # print("Label names:", label_names)
     # Replace "Right-" and "-rh-" with "left-" in all values
 
-    if dataset_name == "Brats": # Left ↔ Right labels are interchanged because BRATS uses inverted orientation / transformed coordinates.
-        import re
+    def convert_label(value):
+            # Handle cortical regions: ctx-lh-region or ctx-rh-region
+            m = re.match(r'ctx-(lh|rh)-(.+)', value)
+            if m:
+                hemi, region = m.groups()
+                # Flip hemisphere for BRATS
+                hemi_word = "left" if hemi == "lh" else "right"
+                result = f"{hemi_word} {region} cortex".replace("-", " ")
+            # Handle white matter: wm-lh-region or wm-rh-region
+            elif re.match(r'wm-(lh|rh)-(.+)', value):
+                m = re.match(r'wm-(lh|rh)-(.+)', value)
+                hemi, region = m.groups()
+                hemi_word = "left" if hemi == "lh" else "right"
+                result = f"{hemi_word} {region} white matter".replace("-", " ")
+            # Handle subcortical: Left-X or Right-X
+            elif value.startswith("Right-"):
+                result = ("Right " + value[6:]).replace("-", " ")
+            elif value.startswith("Left-"):
+                result = ("Left " + value[5:]).replace("-", " ")
+            else:
+                result = value.replace("-", " ") 
+            # Add space before temporal, frontal, parietal, occipital, cingulate if connected
+            result = re.sub(r'(\w)(temporal|frontal|parietal|occipital|cingulate)', r'\1 \2', result, flags=re.IGNORECASE)
+            return result
+
+    if dataset_name == "Brats": # Left ↔ Right labels are interchanged because BRATS uses inverted orientation / transformed coordinates.   
         def convert_label(value):
             # Handle cortical regions: ctx-lh-region or ctx-rh-region
             m = re.match(r'ctx-(lh|rh)-(.+)', value)
@@ -79,7 +104,7 @@ def process_parcellation(parcellation, segmentation_path, lut_path, volume, data
             result = re.sub(r'(\w)(temporal|frontal|parietal|occipital|cingulate)', r'\1 \2', result, flags=re.IGNORECASE)
             return result
 
-        label_names = {label: convert_label(value) for label, value in label_names.items()}
+    label_names = {label: convert_label(value) for label, value in label_names.items()}
 
     parcel = parcellation
     mask = nib.load(segmentation_path).get_fdata()
