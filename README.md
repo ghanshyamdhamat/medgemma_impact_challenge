@@ -1,8 +1,8 @@
-# Gemma3S: Reimagining Radiology with Spot, Segment & Simplify
+# UniRad3S: Reimagining Radiology with Spot, Segment & Simplify
 
 ## Overview
 
-**Gemma3S** is an end-to-end radiology suite built on Google’s **MedSigLIP** and **MedGemma** along with MedSAM2.  It enables automated diagnosis, precise lesion segmentation, and longitudinal tracking, generating both clinical and patient-friendly reports.
+**UniRad3S** is an end-to-end radiology suite built on Google’s **MedSigLIP** and **MedGemma** along with MedSAM2.  It enables automated diagnosis, precise lesion segmentation, and longitudinal tracking, generating both clinical and patient-friendly reports.
 
 ## Key Features of the MedGemma Pillars
 
@@ -199,11 +199,11 @@ clinical, patient = gemma.generate_reports(context_data)
 ## Acknowledgments
 This project stands on the shoulders of giants and would not be possible without the following outstanding works:
 
-Gemma3S is primarily powered by Google's **MedGemma** and **MedSigLIP**, which serve as the central multimodal engines enabling  automated diagnosis, vision–language alignment, and automated clinical reporting.
+UniRad3S is primarily powered by Google's **MedGemma** and **MedSigLIP**, which serve as the central multimodal engines enabling  automated diagnosis, vision–language alignment, and automated clinical reporting.
 - **Paper**  Sellergren, Andrew, et al. "Medgemma technical report." arXiv preprint arXiv:2507.05201 (2025).   
 - **Models**: https://huggingface.co/google/medgemma-1.5-4b-it    https://huggingface.co/google/medsiglip-448
 
-**This codebase builds upon [MedSAM2](https://github.com/bowang-lab/MedSAM2)** by the Bo Wang Lab at University of Toronto. MedSAM2 provides the foundational segmentation framework that powers GEMMA3S.
+**This codebase builds upon [MedSAM2](https://github.com/bowang-lab/MedSAM2)** by the Bo Wang Lab at University of Toronto. MedSAM2 provides the foundational segmentation framework that powers UniRad3S.
 - **Paper**: Ma, Jun, et al. "Medsam2: Segment anything in 3d medical images and videos." arXiv preprint arXiv:2504.03600 (2025).
 - **Models**: https://huggingface.co/wanglab/MedSAM2
 - **Project Page**: https://medsam2.github.io/
