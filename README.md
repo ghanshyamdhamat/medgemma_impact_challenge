@@ -62,8 +62,8 @@
 
 ## Project Structure
 ```
-gemma3s/
-├── app_gemma3s.py              # Main Gradio application
+unirad3s/
+├── app_unirad3s.py              # Main Gradio application
 ├── simplify_report.py           # MedGemma report generation module
 ├── pipeline.py                  # Automated analysis pipeline
 ├── folder_watcher.py            # File system monitoring for auto-processing
@@ -149,8 +149,8 @@ export GRADIO_SERVER_PORT=18863           # Optional: custom port
 
 ### Launch the Application
 ```bash
-cd gemma3s
-python app_gemma3s.py
+cd unirad3s
+python app_unirad3s.py
 ```
 The application will start on `http://0.0.0.0:18863` (or your configured port).
 
